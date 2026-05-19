@@ -292,7 +292,8 @@ void hfs_mdb_commit(struct super_block *sb)
 		return;
 
 	lock_buffer(HFS_SB(sb)->mdb_bh);
-	if (test_and_clear_bit(HFS_FLG_MDB_DIRTY, &HFS_SB(sb)->flags)) {
+	if (test_and_clear_bit(HFS_FLG_MDB_DIRTY, &HFS_SB(sb)->flags) &&
+	    buffer_uptodate(HFS_SB(sb)->mdb_bh)) {
 		/* These parameters may have been modified, so write them back */
 		mdb->drLsMod = hfs_mtime();
 		mdb->drFreeBks = cpu_to_be16(HFS_SB(sb)->free_ablocks);
@@ -320,13 +321,16 @@ void hfs_mdb_commit(struct super_block *sb)
 				     &mdb->drCTFlSize, NULL);
 
 		lock_buffer(HFS_SB(sb)->alt_mdb_bh);
-		memcpy(HFS_SB(sb)->alt_mdb, HFS_SB(sb)->mdb, HFS_SECTOR_SIZE);
-		HFS_SB(sb)->alt_mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
-		HFS_SB(sb)->alt_mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
-		unlock_buffer(HFS_SB(sb)->alt_mdb_bh);
-
-		mark_buffer_dirty(HFS_SB(sb)->alt_mdb_bh);
-		sync_dirty_buffer(HFS_SB(sb)->alt_mdb_bh);
+		if (buffer_uptodate(HFS_SB(sb)->alt_mdb_bh)) {
+			memcpy(HFS_SB(sb)->alt_mdb, HFS_SB(sb)->mdb, HFS_SECTOR_SIZE);
+			HFS_SB(sb)->alt_mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
+			HFS_SB(sb)->alt_mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
+			unlock_buffer(HFS_SB(sb)->alt_mdb_bh);
+			mark_buffer_dirty(HFS_SB(sb)->alt_mdb_bh);
+			sync_dirty_buffer(HFS_SB(sb)->alt_mdb_bh);
+		} else {
+			unlock_buffer(HFS_SB(sb)->alt_mdb_bh);
+		}
 	}
 
 	if (test_and_clear_bit(HFS_FLG_BITMAP_DIRTY, &HFS_SB(sb)->flags)) {
@@ -367,6 +371,8 @@ void hfs_mdb_close(struct super_block *sb)
 {
 	/* update volume attributes */
 	if (sb_rdonly(sb))
+		return;
+	if (!buffer_uptodate(HFS_SB(sb)->mdb_bh))
 		return;
 	HFS_SB(sb)->mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
 	HFS_SB(sb)->mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
