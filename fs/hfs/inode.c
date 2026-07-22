@@ -23,7 +23,6 @@
 #include "hfs_fs.h"
 #include "btree.h"
 
-static const struct file_operations hfs_file_operations;
 static const struct inode_operations hfs_file_inode_operations;
 
 /*================ Variable-like macros ================*/
@@ -617,32 +616,6 @@ void hfs_evict_inode(struct inode *inode)
 	}
 }
 
-static int hfs_file_open(struct inode *inode, struct file *file)
-{
-	if (HFS_IS_RSRC(inode))
-		inode = HFS_I(inode)->rsrc_inode;
-	atomic_inc(&HFS_I(inode)->opencnt);
-	return 0;
-}
-
-static int hfs_file_release(struct inode *inode, struct file *file)
-{
-	//struct super_block *sb = inode->i_sb;
-
-	if (HFS_IS_RSRC(inode))
-		inode = HFS_I(inode)->rsrc_inode;
-	if (atomic_dec_and_test(&HFS_I(inode)->opencnt)) {
-		inode_lock(inode);
-		hfs_file_truncate(inode);
-		//if (inode->i_flags & S_DEAD) {
-		//	hfs_delete_cat(inode->i_ino, HFSPLUS_SB(sb).hidden_dir, NULL);
-		//	hfs_delete_inode(inode);
-		//}
-		inode_unlock(inode);
-	}
-	return 0;
-}
-
 int hfs_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		      struct iattr *attr)
 {
@@ -694,32 +667,6 @@ int hfs_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	return 0;
 }
 
-static int hfs_file_fsync(struct file *filp, loff_t start, loff_t end,
-			  int datasync)
-{
-	struct inode *inode = filp->f_mapping->host;
-	struct super_block * sb;
-	int ret, err;
-
-	ret = file_write_and_wait_range(filp, start, end);
-	if (ret)
-		return ret;
-	inode_lock(inode);
-
-	/* sync the inode to buffers */
-	ret = write_inode_now(inode, 0);
-
-	/* sync the superblock to buffers */
-	sb = inode->i_sb;
-	flush_delayed_work(&HFS_SB(sb)->mdb_work);
-	/* .. finally sync the buffers to disk */
-	err = sync_blockdev(sb->s_bdev);
-	if (!ret)
-		ret = err;
-	inode_unlock(inode);
-	return ret;
-}
-
 int hfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 {
 	/*
@@ -731,18 +678,6 @@ int hfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 	fa->flags |= FS_CASEFOLD_FL;
 	return 0;
 }
-
-static const struct file_operations hfs_file_operations = {
-	.llseek		= generic_file_llseek,
-	.read_iter	= generic_file_read_iter,
-	.write_iter	= generic_file_write_iter,
-	.mmap_prepare	= generic_file_mmap_prepare,
-	.splice_read	= filemap_splice_read,
-	.splice_write	= iter_file_splice_write,
-	.fsync		= hfs_file_fsync,
-	.open		= hfs_file_open,
-	.release	= hfs_file_release,
-};
 
 static const struct inode_operations hfs_file_inode_operations = {
 	.lookup		= hfs_file_lookup,

@@ -203,6 +203,9 @@ int hfs_write_begin(const struct kiocb *iocb, struct address_space *mapping,
 		    void **fsdata);
 extern struct inode *hfs_new_inode(struct inode *dir, const struct qstr *name,
 				   umode_t mode);
+
+/* file.c */
+extern const struct file_operations hfs_file_operations;
 extern void hfs_inode_write_fork(struct inode *inode, struct hfs_extent *ext,
 				 __be32 *log_size, __be32 *phys_size);
 extern int hfs_write_inode(struct inode *inode, struct writeback_control *wbc);
