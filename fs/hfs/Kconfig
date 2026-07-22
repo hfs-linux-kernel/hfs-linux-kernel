@@ -4,7 +4,6 @@ config HFS_FS
 	depends on BLOCK
 	select BUFFER_HEAD
 	select NLS
-	select LEGACY_DIRECT_IO
 	select FS_IOMAP
 	help
 	  If you say Y here, you will be able to mount Macintosh-formatted

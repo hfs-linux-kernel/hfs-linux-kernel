@@ -12,6 +12,7 @@
 
 #include "hfs_fs.h"
 #include "btree.h"
+#include "iomap.h"
 
 /*================ File-local functions ================*/
 
@@ -525,20 +526,44 @@ void hfs_file_truncate(struct inode *inode)
 		inode->i_ino, (long long)HFS_I(inode)->phys_size,
 		inode->i_size);
 	if (inode->i_size > HFS_I(inode)->phys_size) {
-		struct address_space *mapping = inode->i_mapping;
-		void *fsdata = NULL;
-		struct folio *folio;
+		if (S_ISREG(inode->i_mode)) {
+			/*
+			 * Regular file data forks are backed by the iomap
+			 * write path; extend and zero-fill via iomap so the
+			 * new range is actually allocated and mark_dirty'd
+			 * consistently with hfs_write_iomap_end(). B-tree
+			 * metadata inodes (not S_ISREG) stay on the
+			 * buffer_head path below.
+			 */
+			res = hfs_iomap_cont_expand(inode, inode->i_size);
+			if (res) {
+				inode->i_size = HFS_I(inode)->phys_size;
+				return;
+			}
 
-		/* XXX: Can use generic_cont_expand? */
-		size = inode->i_size - 1;
-		res = hfs_write_begin(NULL, mapping, size + 1, 0, &folio,
-				&fsdata);
-		if (!res) {
-			res = generic_write_end(NULL, mapping, size + 1, 0, 0,
-					folio, fsdata);
+			mark_inode_dirty(inode);
+		} else {
+			struct address_space *mapping = inode->i_mapping;
+			void *fsdata = NULL;
+			struct folio *folio;
+
+			/* XXX: Can use generic_cont_expand? */
+			size = inode->i_size - 1;
+			res = hfs_write_begin(NULL, mapping, size + 1, 0,
+					      &folio, &fsdata);
+			if (!res) {
+				res = generic_write_end(NULL, mapping,
+							size + 1, 0, 0,
+							folio, fsdata);
+			}
+			if (res) {
+				inode->i_size = HFS_I(inode)->phys_size;
+				return;
+			}
+
+			mark_inode_dirty(inode);
 		}
-		if (res)
-			inode->i_size = HFS_I(inode)->phys_size;
+
 		return;
 	} else if (inode->i_size == HFS_I(inode)->phys_size)
 		return;

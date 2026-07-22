@@ -19,9 +19,11 @@
 #include <linux/xattr.h>
 #include <linux/blkdev.h>
 #include <linux/fileattr.h>
+#include <linux/iomap.h>
 
 #include "hfs_fs.h"
 #include "btree.h"
+#include "iomap.h"
 
 static const struct inode_operations hfs_file_inode_operations;
 
@@ -29,7 +31,12 @@ static const struct inode_operations hfs_file_inode_operations;
 
 #define HFS_VALID_MODE_BITS  (S_IFREG | S_IFDIR | S_IRWXUGO)
 
-static int hfs_read_folio(struct file *file, struct folio *folio)
+/*
+ * buffer_head/hfs_get_block() based read_folio, kept for the B-tree
+ * metadata files (hfs_btree_aops). HFS has no symlinks, so unlike
+ * hfsplus there is no other buffer_head-based a_ops user left.
+ */
+static int hfs_legacy_read_folio(struct file *file, struct folio *folio)
 {
 	return block_read_full_folio(folio, hfs_get_block);
 }
@@ -130,33 +137,8 @@ static bool hfs_release_folio(struct folio *folio, gfp_t mask)
 	return res ? try_to_free_buffers(folio) : false;
 }
 
-static ssize_t hfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
-{
-	struct file *file = iocb->ki_filp;
-	struct address_space *mapping = file->f_mapping;
-	struct inode *inode = mapping->host;
-	size_t count = iov_iter_count(iter);
-	ssize_t ret;
-
-	ret = blockdev_direct_IO(iocb, inode, iter, hfs_get_block);
-
-	/*
-	 * In case of error extending write may have instantiated a few
-	 * blocks outside i_size. Trim these off again.
-	 */
-	if (unlikely(iov_iter_rw(iter) == WRITE && ret < 0)) {
-		loff_t isize = i_size_read(inode);
-		loff_t end = iocb->ki_pos + count;
-
-		if (end > isize)
-			hfs_write_failed(mapping, end);
-	}
-
-	return ret;
-}
-
-static int hfs_writepages(struct address_space *mapping,
-			  struct writeback_control *wbc)
+static int hfs_legacy_writepages(struct address_space *mapping,
+				 struct writeback_control *wbc)
 {
 	return mpage_writepages(mapping, wbc, hfs_get_block);
 }
@@ -164,8 +146,8 @@ static int hfs_writepages(struct address_space *mapping,
 const struct address_space_operations hfs_btree_aops = {
 	.dirty_folio	= block_dirty_folio,
 	.invalidate_folio = block_invalidate_folio,
-	.read_folio	= hfs_read_folio,
-	.writepages	= hfs_writepages,
+	.read_folio	= hfs_legacy_read_folio,
+	.writepages	= hfs_legacy_writepages,
 	.write_begin	= hfs_write_begin,
 	.write_end	= generic_write_end,
 	.migrate_folio	= buffer_migrate_folio,
@@ -173,16 +155,46 @@ const struct address_space_operations hfs_btree_aops = {
 	.release_folio	= hfs_release_folio,
 };
 
+static int hfs_read_folio(struct file *file, struct folio *folio)
+{
+	iomap_bio_read_folio(folio, &hfs_iomap_ops);
+	return 0;
+}
+
+static void hfs_readahead(struct readahead_control *rac)
+{
+	iomap_bio_readahead(rac, &hfs_iomap_ops);
+}
+
+static int hfs_writepages(struct address_space *mapping,
+			  struct writeback_control *wbc)
+{
+	struct iomap_writepage_ctx wpc = {
+		.inode	= mapping->host,
+		.wbc	= wbc,
+		.ops	= &hfs_writeback_ops,
+	};
+
+	return iomap_writepages(&wpc);
+}
+
+static sector_t hfs_aop_bmap(struct address_space *mapping, sector_t block)
+{
+	return iomap_bmap(mapping, block, &hfs_iomap_ops);
+}
+
 const struct address_space_operations hfs_aops = {
-	.dirty_folio	= block_dirty_folio,
-	.invalidate_folio = block_invalidate_folio,
-	.read_folio	= hfs_read_folio,
-	.write_begin	= hfs_write_begin,
-	.write_end	= generic_write_end,
-	.bmap		= hfs_bmap,
-	.direct_IO	= hfs_direct_IO,
-	.writepages	= hfs_writepages,
-	.migrate_folio	= buffer_migrate_folio,
+	.read_folio		= hfs_read_folio,
+	.readahead		= hfs_readahead,
+	.writepages		= hfs_writepages,
+	.dirty_folio		= iomap_dirty_folio,
+	.bmap			= hfs_aop_bmap,
+	.migrate_folio		= filemap_migrate_folio,
+	.is_partially_uptodate	= iomap_is_partially_uptodate,
+	.error_remove_folio	= generic_error_remove_folio,
+	.release_folio		= iomap_release_folio,
+	.invalidate_folio	= iomap_invalidate_folio,
+	.swap_activate		= hfs_iomap_swap_activate,
 };
 
 /*
