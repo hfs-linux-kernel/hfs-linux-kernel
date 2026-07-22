@@ -278,6 +278,23 @@ static inline __be32 __hfs_u_to_mtime(time64_t ut)
 #define HFS_I(inode)	(container_of(inode, struct hfs_inode_info, vfs_inode))
 #define HFS_SB(sb)	((struct hfs_sb_info *)(sb)->s_fs_info)
 
+/*
+ * Physical byte offset of allocation block 'dblock' on the volume.
+ */
+static inline loff_t hfs_ablock_to_phys_bytes(struct super_block *sb,
+					      u16 dblock)
+{
+	struct hfs_sb_info *sbi = HFS_SB(sb);
+	loff_t phys_bytes;
+
+	phys_bytes = dblock;
+	phys_bytes *= sbi->fs_div;
+	phys_bytes += sbi->fs_start;
+	phys_bytes <<= sb->s_blocksize_bits;
+
+	return phys_bytes;
+}
+
 #define hfs_m_to_utime(time)   (struct timespec64){ .tv_sec = __hfs_m_to_utime(time) }
 #define hfs_u_to_mtime(time)   __hfs_u_to_mtime((time).tv_sec)
 #define hfs_mtime()		__hfs_u_to_mtime(ktime_get_real_seconds())
