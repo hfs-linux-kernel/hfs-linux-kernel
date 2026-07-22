@@ -67,22 +67,27 @@ int hfs_ext_keycmp(const btree_key *key1, const btree_key *key2)
 }
 
 /*
- * hfs_ext_find_block
+ * hfs_ext_find_block() - find contiguous sequence of blocks
  *
- * Find a block within an extent record
+ * Find the disk allocation block for 'off' within a 3-entry extent
+ * record, and the number of further allocation blocks that are
+ * contiguous with it in the same extent entry.
  */
-u16 hfs_ext_find_block(struct hfs_extent *ext, u16 off)
+u16 hfs_ext_find_block(struct hfs_extent *ext, u16 off, u16 *dblock)
 {
 	int i;
 	u16 count;
 
-	for (i = 0; i < 3; ext++, i++) {
+	for (i = 0; i < HFS_FORK_EXTENT_COUNT; ext++, i++) {
 		count = be16_to_cpu(ext->count);
-		if (off < count)
-			return be16_to_cpu(ext->block) + off;
+		if (off < count) {
+			*dblock = be16_to_cpu(ext->block) + off;
+			return count - off;
+		}
 		off -= count;
 	}
 	/* panic? */
+	*dblock = 0;
 	return 0;
 }
 
@@ -91,7 +96,7 @@ static int hfs_ext_block_count(struct hfs_extent *ext)
 	int i;
 	u16 count = 0;
 
-	for (i = 0; i < 3; ext++, i++)
+	for (i = 0; i < HFS_FORK_EXTENT_COUNT; ext++, i++)
 		count += be16_to_cpu(ext->count);
 	return count;
 }
@@ -331,16 +336,67 @@ int hfs_free_fork(struct super_block *sb, struct hfs_cat_file *file, int type)
 }
 
 /*
- * hfs_get_block
+ * hfs_map_extent() - find or allocate a sequence of allocation blocks
+ *
+ * Looks up the allocation block at 'ablock' for inode, extending the
+ * file (via hfs_extend_file(), in clump_blocks-sized chunks) when
+ * 'create' is set and 'ablock' lies beyond the current allocation.
+ *
+ * On success, *dblock is the disk allocation block backing 'ablock',
+ * and *max_blocks is the number of further allocation blocks that are
+ * contiguous with it (i.e. the remaining length of the extent entry
+ * that contains 'ablock'), which may be smaller than the whole file's
+ * remaining allocation when the fork is fragmented across several
+ * extent entries. If a new extent had to be allocated to satisfy the
+ * request, *balloc (when non-NULL) is set to true.
  */
+int hfs_map_extent(struct inode *inode, u16 ablock, int create,
+		   u16 *dblock, u16 *max_blocks, bool *balloc)
+{
+	int res;
+
+	if (balloc)
+		*balloc = false;
+
+	if (ablock >= HFS_I(inode)->alloc_blocks) {
+		if (!create)
+			return -EIO;
+		res = hfs_extend_file(inode);
+		if (res)
+			return res;
+		if (balloc)
+			*balloc = true;
+	}
+
+	if (ablock < HFS_I(inode)->first_blocks) {
+		*max_blocks = hfs_ext_find_block(HFS_I(inode)->first_extents,
+						 ablock, dblock);
+		return 0;
+	}
+
+	mutex_lock(&HFS_I(inode)->extents_lock);
+	res = hfs_ext_read_extent(inode, ablock);
+	if (!res)
+		*max_blocks = hfs_ext_find_block(HFS_I(inode)->cached_extents,
+						 ablock - HFS_I(inode)->cached_start,
+						 dblock);
+	else {
+		mutex_unlock(&HFS_I(inode)->extents_lock);
+		return -EIO;
+	}
+	mutex_unlock(&HFS_I(inode)->extents_lock);
+
+	return 0;
+}
+
+/* Get a block at iblock for inode, possibly allocating if create */
 int hfs_get_block(struct inode *inode, sector_t block,
 		  struct buffer_head *bh_result, int create)
 {
-	struct super_block *sb;
-	u16 dblock, ablock;
+	struct super_block *sb = inode->i_sb;
+	u16 dblock, ablock, max_blocks;
 	int res;
 
-	sb = inode->i_sb;
 	/* Convert inode block to disk allocation block */
 	ablock = (u32)block / HFS_SB(sb)->fs_div;
 
@@ -349,31 +405,14 @@ int hfs_get_block(struct inode *inode, sector_t block,
 			return 0;
 		if (block > HFS_I(inode)->fs_blocks)
 			return -EIO;
-		if (ablock >= HFS_I(inode)->alloc_blocks) {
-			res = hfs_extend_file(inode);
-			if (res)
-				return res;
-		}
 	} else
 		create = 0;
 
-	if (ablock < HFS_I(inode)->first_blocks) {
-		dblock = hfs_ext_find_block(HFS_I(inode)->first_extents, ablock);
-		goto done;
-	}
+	res = hfs_map_extent(inode, ablock, create, &dblock, &max_blocks,
+			     NULL);
+	if (res)
+		return res;
 
-	mutex_lock(&HFS_I(inode)->extents_lock);
-	res = hfs_ext_read_extent(inode, ablock);
-	if (!res)
-		dblock = hfs_ext_find_block(HFS_I(inode)->cached_extents,
-					    ablock - HFS_I(inode)->cached_start);
-	else {
-		mutex_unlock(&HFS_I(inode)->extents_lock);
-		return -EIO;
-	}
-	mutex_unlock(&HFS_I(inode)->extents_lock);
-
-done:
 	map_bh(bh_result, sb, HFS_SB(sb)->fs_start +
 	       dblock * HFS_SB(sb)->fs_div +
 	       (u32)block % HFS_SB(sb)->fs_div);

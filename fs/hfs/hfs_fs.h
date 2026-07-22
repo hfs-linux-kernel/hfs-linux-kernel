@@ -180,13 +180,15 @@ extern const struct inode_operations hfs_dir_inode_operations;
 
 /* extent.c */
 extern int hfs_ext_keycmp(const btree_key *key1, const btree_key *key2);
-extern u16 hfs_ext_find_block(struct hfs_extent *ext, u16 off);
+extern u16 hfs_ext_find_block(struct hfs_extent *ext, u16 off, u16 *dblock);
 extern int hfs_free_fork(struct super_block *sb,
 			 struct hfs_cat_file *file, int type);
 extern int hfs_ext_write_extent(struct inode *inode);
 extern int hfs_extend_file(struct inode *inode);
 extern void hfs_file_truncate(struct inode *inode);
 
+extern int hfs_map_extent(struct inode *inode, u16 ablock, int create,
+			  u16 *dblock, u16 *max_blocks, bool *balloc);
 extern int hfs_get_block(struct inode *inode, sector_t block,
 			 struct buffer_head *bh_result, int create);
 

@@ -201,7 +201,7 @@ struct hfs_btree *hfs_btree_open(struct super_block *sb, u32 id, btree_keycmp ke
 
 	folio_zero_range(folio, 0, folio_size(folio));
 
-	dblock = hfs_ext_find_block(HFS_I(tree->inode)->first_extents, 0);
+	hfs_ext_find_block(HFS_I(tree->inode)->first_extents, 0, &dblock);
 	start_block = HFS_SB(sb)->fs_start + (dblock * HFS_SB(sb)->fs_div);
 
 	size = folio_size(folio);
