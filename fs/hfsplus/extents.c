@@ -243,8 +243,13 @@ int hfsplus_get_block(struct inode *inode, sector_t iblock,
 	if (iblock >= hip->fs_blocks) {
 		if (!create)
 			return 0;
-		if (iblock > hip->fs_blocks)
+		if (iblock > hip->fs_blocks) {
+			pr_err("hfsplus_get_block: non-sequential dio write: "
+			       "iblock=%llu fs_blocks=%llu alloc_blocks=%u i_size=%llu\n",
+			       (u64)iblock, (u64)hip->fs_blocks, hip->alloc_blocks,
+			       i_size_read(inode));
 			return -EIO;
+		}
 		if (ablock >= hip->alloc_blocks) {
 			res = hfsplus_file_extend(inode, false);
 			if (res)
@@ -286,6 +291,16 @@ done:
 	sector = ((sector_t)dblock << sbi->fs_shift) +
 		  sbi->blockoffset + (iblock & mask);
 	map_bh(bh_result, sb, sector);
+
+	if ((loff_t)iblock * sb->s_blocksize >= 0x58000 &&
+	    (loff_t)iblock * sb->s_blocksize < 0x80000) {
+		pr_err("hfsplus_get_block: ino=%llu iblock=%llu ablock=%u "
+		       "dblock=%u sector=%llu create=%d fs_blocks=%llu "
+		       "alloc_blocks=%u i_size=%lld\n",
+		       inode->i_ino, (u64)iblock, ablock, dblock,
+		       (u64)sector, create, (u64)hip->fs_blocks,
+		       hip->alloc_blocks, i_size_read(inode));
+	}
 
 	if (create) {
 		set_buffer_new(bh_result);

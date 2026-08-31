@@ -138,6 +138,9 @@ static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	loff_t end = iocb->ki_pos + count;
 	ssize_t ret;
 
+	pr_err("hfsplus_direct_IO: rw=%d pos=%lld count=%zu i_size=%lld\n",
+	       iov_iter_rw(iter), iocb->ki_pos, count, i_size_read(inode));
+
 	/*
 	 * The hfsplus_get_block() only allows creating the next sequential block.
 	 * For direct writes beyond EOF, expand the file first.
