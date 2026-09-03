@@ -138,30 +138,52 @@ static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	loff_t end = iocb->ki_pos + count;
 	ssize_t ret;
 
-	pr_err("hfsplus_direct_IO: rw=%d pos=%lld count=%zu i_size=%lld\n",
-	       iov_iter_rw(iter), iocb->ki_pos, count, i_size_read(inode));
-
-	/*
-	 * The hfsplus_get_block() only allows creating the next sequential block.
-	 * For direct writes beyond EOF, expand the file first.
-	 */
-	if (iov_iter_rw(iter) == WRITE && iocb->ki_pos > i_size_read(inode)) {
+	if (iov_iter_rw(iter) == WRITE) {
 		loff_t start_off, end_off;
 		loff_t start_page, end_page;
 
 		isize = i_size_read(inode);
 
 		/*
-		 * Wait for any in-flight DIO on this inode to finish before
-		 * calling generic_cont_expand_simple().
+		 * The hfsplus_get_block() only allows creating the next
+		 * sequential block. For direct writes beyond EOF, expand
+		 * the file first.
 		 */
-		inode_dio_wait(inode);
+		if (iocb->ki_pos > isize) {
+			/*
+			 * Wait for any in-flight DIO on this inode to finish
+			 * before calling generic_cont_expand_simple().
+			 */
+			inode_dio_wait(inode);
 
-		ret = generic_cont_expand_simple(inode, iocb->ki_pos);
-		if (ret)
-			return ret;
+			ret = generic_cont_expand_simple(inode, iocb->ki_pos);
+			if (ret)
+				return ret;
+		}
 
-		start_off = isize;
+		/*
+		 * Flush and invalidate the page cache across the whole
+		 * write range, not just the part beyond the old EOF.
+		 *
+		 * A preceding buffered operation (e.g. an mmap write whose
+		 * implicit truncate extended the file) can leave dirty,
+		 * not-yet-written-back pages anywhere the write touches,
+		 * including entirely below the old EOF -- block_write_begin()
+		 * zero-fills the untouched remainder of any newly allocated
+		 * block, and that zero-filled tail can fall well inside the
+		 * range this direct write is about to overwrite.
+		 *
+		 * Without this, blockdev_direct_IO() below writes straight
+		 * to the block device while a stale dirty page for the same
+		 * blocks is still sitting in the page cache; whenever that
+		 * page is eventually written back it silently overwrites the
+		 * direct write's data with the stale buffered content.
+		 *
+		 * start_off covers the pre-expand gap too: it's isize (the
+		 * old EOF) when this write extended the file, and ki_pos
+		 * otherwise.
+		 */
+		start_off = min_t(loff_t, isize, iocb->ki_pos);
 		end_off = (end > 0) ? end - 1 : end;
 
 		ret = filemap_write_and_wait_range(mapping, start_off, end_off);
@@ -326,9 +348,25 @@ static int hfsplus_setattr(struct mnt_idmap *idmap,
 							   attr->ia_size);
 			if (error)
 				return error;
+			truncate_setsize(inode, attr->ia_size);
+			/*
+			 * generic_cont_expand_simple() has already created
+			 * every block up to attr->ia_size and left
+			 * hip->phys_size correctly set to the (block-aligned)
+			 * end of the last block it created. Calling
+			 * hfsplus_file_truncate() here would find
+			 * i_size <= phys_size, fall through to its shrink
+			 * path, and unconditionally reset
+			 * hip->phys_size = inode->i_size -- clobbering that
+			 * correct value with the (generally non-block-aligned)
+			 * new i_size. A later extending truncate would then
+			 * treat the resulting gap as an unwritten hole and
+			 * zero-fill over the real data this grow just wrote.
+			 */
+		} else {
+			truncate_setsize(inode, attr->ia_size);
+			hfsplus_file_truncate(inode);
 		}
-		truncate_setsize(inode, attr->ia_size);
-		hfsplus_file_truncate(inode);
 		inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 	}
 

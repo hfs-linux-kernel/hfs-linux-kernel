@@ -243,13 +243,8 @@ int hfsplus_get_block(struct inode *inode, sector_t iblock,
 	if (iblock >= hip->fs_blocks) {
 		if (!create)
 			return 0;
-		if (iblock > hip->fs_blocks) {
-			pr_err("hfsplus_get_block: non-sequential dio write: "
-			       "iblock=%llu fs_blocks=%llu alloc_blocks=%u i_size=%llu\n",
-			       (u64)iblock, (u64)hip->fs_blocks, hip->alloc_blocks,
-			       i_size_read(inode));
+		if (iblock > hip->fs_blocks)
 			return -EIO;
-		}
 		if (ablock >= hip->alloc_blocks) {
 			res = hfsplus_file_extend(inode, false);
 			if (res)
@@ -292,19 +287,27 @@ done:
 		  sbi->blockoffset + (iblock & mask);
 	map_bh(bh_result, sb, sector);
 
-	if ((loff_t)iblock * sb->s_blocksize >= 0x58000 &&
-	    (loff_t)iblock * sb->s_blocksize < 0x80000) {
-		pr_err("hfsplus_get_block: ino=%llu iblock=%llu ablock=%u "
-		       "dblock=%u sector=%llu create=%d fs_blocks=%llu "
-		       "alloc_blocks=%u i_size=%lld\n",
-		       inode->i_ino, (u64)iblock, ablock, dblock,
-		       (u64)sector, create, (u64)hip->fs_blocks,
-		       hip->alloc_blocks, i_size_read(inode));
-	}
-
 	if (create) {
 		set_buffer_new(bh_result);
-		hip->phys_size += sb->s_blocksize;
+		/*
+		 * phys_size tracks how far real, on-disk data extends and is
+		 * used by cont_expand_zero() (via cont_write_begin()) to
+		 * decide which bytes of a later extending truncate are a
+		 * genuine hole that needs zero-filling. It must always land
+		 * on the true end of the block just created here.
+		 *
+		 * Simply adding sb->s_blocksize is wrong whenever phys_size
+		 * isn't already block-aligned (e.g. it was last set to a
+		 * mid-block value by a truncate that grew the file to a
+		 * non-block-aligned size): the leftover sub-block offset
+		 * would keep propagating forward through every subsequent
+		 * block instead of being absorbed by this one, leaving
+		 * phys_size permanently short of the real end of file. A
+		 * later extending truncate would then treat the unaccounted
+		 * tail of this just-written block as a hole and zero-fill
+		 * real data with cont_expand_zero(), corrupting it.
+		 */
+		hip->phys_size = (loff_t)(iblock + 1) << sb->s_blocksize_bits;
 		hip->fs_blocks++;
 		inode_add_bytes(inode, sb->s_blocksize);
 	}

@@ -10,7 +10,6 @@
  */
 
 #include <linux/pagemap.h>
-#include <linux/sched.h>
 
 #include "hfsplus_fs.h"
 #include "hfsplus_raw.h"
@@ -157,12 +156,6 @@ done:
 	sbi->free_blocks -= *max;
 	hfsplus_mark_mdb_dirty(sb);
 	hfs_dbg("start %u, max %u\n", start, *max);
-	if (start < 4400 && start + *max > 4200) {
-		pr_err("hfsplus_block_allocate: start=%u len=%u caller=%pS "
-		       "comm=%s pid=%d\n",
-		       start, *max, __builtin_return_address(0),
-		       current->comm, current->pid);
-	}
 out:
 	mutex_unlock(&sbi->alloc_mutex);
 	return start;
@@ -182,12 +175,6 @@ int hfsplus_block_free(struct super_block *sb, u32 offset, u32 count)
 		return 0;
 
 	hfs_dbg("offset %u, count %u\n", offset, count);
-	if (offset < 4400 && offset + count > 4200) {
-		pr_err("hfsplus_block_free: offset=%u count=%u caller=%pS "
-		       "comm=%s pid=%d\n",
-		       offset, count, __builtin_return_address(0),
-		       current->comm, current->pid);
-	}
 	/* are all of the bits in range? */
 	if ((offset + count) > sbi->total_blocks)
 		return -ENOENT;
