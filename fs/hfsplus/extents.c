@@ -343,7 +343,25 @@ int hfsplus_get_block(struct inode *inode, sector_t iblock,
 
 	if (create) {
 		set_buffer_new(bh_result);
-		hip->phys_size += sb->s_blocksize;
+		/*
+		 * phys_size tracks how far real, on-disk data extends and is
+		 * used by cont_expand_zero() (via cont_write_begin()) to
+		 * decide which bytes of a later extending truncate are a
+		 * genuine hole that needs zero-filling. It must always land
+		 * on the true end of the block just created here.
+		 *
+		 * Simply adding sb->s_blocksize is wrong whenever phys_size
+		 * isn't already block-aligned (e.g. it was last set to a
+		 * mid-block value by a truncate that grew the file to a
+		 * non-block-aligned size): the leftover sub-block offset
+		 * would keep propagating forward through every subsequent
+		 * block instead of being absorbed by this one, leaving
+		 * phys_size permanently short of the real end of file. A
+		 * later extending truncate would then treat the unaccounted
+		 * tail of this just-written block as a hole and zero-fill
+		 * real data with cont_expand_zero(), corrupting it.
+		 */
+		hip->phys_size = (loff_t)(iblock + 1) << sb->s_blocksize_bits;
 		hip->fs_blocks++;
 		inode_add_bytes(inode, sb->s_blocksize);
 		mark_inode_dirty(inode);

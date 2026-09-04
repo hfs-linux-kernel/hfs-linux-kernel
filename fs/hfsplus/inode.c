@@ -293,9 +293,25 @@ static int hfsplus_setattr(struct mnt_idmap *idmap,
 				i_size_write(inode, old_size);
 				return error;
 			}
+			truncate_setsize(inode, attr->ia_size);
+			/*
+			 * hfsplus_iomap_cont_expand() has already created
+			 * every block up to attr->ia_size and left
+			 * hip->phys_size correctly set to the (block-aligned)
+			 * end of the last block it created. Calling
+			 * hfsplus_file_truncate() here would find
+			 * i_size <= phys_size, fall through to its shrink
+			 * path, and unconditionally reset
+			 * hip->phys_size = inode->i_size -- clobbering that
+			 * correct value with the (generally non-block-aligned)
+			 * new i_size. A later extending truncate would then
+			 * treat the resulting gap as an unwritten hole and
+			 * zero-fill over the real data this grow just wrote.
+			 */
+		} else {
+			truncate_setsize(inode, attr->ia_size);
+			hfsplus_file_truncate(inode);
 		}
-		truncate_setsize(inode, attr->ia_size);
-		hfsplus_file_truncate(inode);
 		inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 	}
 
