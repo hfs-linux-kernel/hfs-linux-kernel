@@ -33,7 +33,21 @@ static int __hfsplus_iomap_begin(struct inode *inode, loff_t offset,
 			return 0;
 		}
 
-		/* Clamp length if the requested range goes beyond i_size */
+		/*
+		 * Clamp length if the requested range goes beyond i_size.
+		 *
+		 * Round up to the block boundary rather than stopping exactly
+		 * at i_size: this mapping is shared by plain reads, readahead
+		 * (which routinely probes well past i_size) and writeback, and
+		 * splitting a single block/folio into a MAPPED-then-HOLE pair
+		 * mid-block is not something those generic paths expect from
+		 * this filesystem. Instead, the tail of the final partial
+		 * block is made genuinely safe to read back by having the
+		 * shrink path (hfsplus_setattr()) explicitly zero it on disk
+		 * via iomap_truncate_page() at truncate time -- see there.
+		 * That makes reporting this whole block as real, mapped data
+		 * correct rather than a lie.
+		 */
 		if (offset + length > i_size_read(inode)) {
 			loff_t i_size = i_size_read(inode);
 			unsigned int blocksize = i_blocksize(inode);
@@ -111,7 +125,26 @@ static int hfsplus_write_iomap_end(struct inode *inode, loff_t pos,
 	if (!written)
 		return 0;
 
-	end = round_up(pos + written, sb->s_blocksize);
+	end = pos + written;
+
+	/*
+	 * Only round the new high-water mark up to the next block boundary
+	 * when this segment was IOMAP_F_NEW: that is the only case where
+	 * generic iomap code guarantees it already zero-filled the
+	 * untouched remainder of that final block as part of this same
+	 * operation (see the need_zeroout handling in iomap_dio_bio_iter()).
+	 *
+	 * For an existing (not new) mapping this write can be an ordinary
+	 * overwrite of some earlier portion of an already-real block whose
+	 * tail is a still-pending gap left by an earlier truncate (phys_size
+	 * sitting mid-block, non-block-aligned). Rounding up unconditionally
+	 * would silently claim that gap as real without ever having written
+	 * or zeroed it, permanently hiding it from any later extending
+	 * truncate that would otherwise have zero-filled it -- exposing
+	 * whatever stale data is still physically on disk there.
+	 */
+	if (iomap->flags & IOMAP_F_NEW)
+		end = round_up(end, sb->s_blocksize);
 
 	if (hip->phys_size < end) {
 		inode_add_bytes(inode, end - hip->phys_size);

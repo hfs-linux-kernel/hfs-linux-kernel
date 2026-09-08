@@ -309,6 +309,31 @@ static int hfsplus_setattr(struct mnt_idmap *idmap,
 			 * zero-fill over the real data this grow just wrote.
 			 */
 		} else {
+			bool did_zero = false;
+
+			/*
+			 * The new EOF can land in the middle of a block. That
+			 * block stays real, allocated backing store (its
+			 * bytes before the new EOF are still valid file data,
+			 * and hfsplus_iomap_begin() reports the whole block as
+			 * IOMAP_MAPPED for any future read), but truncate_setsize()
+			 * below only clears the page cache past the new EOF --
+			 * it never touches the on-disk block itself. Without
+			 * this, the tail of that block (new EOF up to the next
+			 * block boundary) keeps whatever stale data was
+			 * physically on disk, and a later read that faults the
+			 * page back in after it was reclaimed would expose it
+			 * instead of zeros. Zero that tail on disk now, while
+			 * the block is still mapped, so any future read of it
+			 * is genuinely correct rather than relying on the
+			 * page cache to hide it.
+			 */
+			error = iomap_truncate_page(inode, attr->ia_size,
+						    &did_zero,
+						    &hfsplus_write_iomap_ops,
+						    NULL, NULL);
+			if (error)
+				return error;
 			truncate_setsize(inode, attr->ia_size);
 			hfsplus_file_truncate(inode);
 		}

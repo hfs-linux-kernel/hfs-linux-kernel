@@ -276,6 +276,23 @@ int hfsplus_map_extent(struct inode *inode, u32 ablock, int create,
 		*max_blocks = hfsplus_ext_find_block(hip->first_extents,
 						     ablock,
 						     dblock);
+		/*
+		 * hfsplus_ext_find_block() falls off the end of the extent
+		 * record ("panic?") when 'ablock' is not actually covered by
+		 * any of its entries -- inconsistent on-disk extent state, or
+		 * a caller passing an 'ablock' past what the fork's own
+		 * bookkeeping (alloc_blocks/first_blocks) says is valid. It
+		 * reports that as *max_blocks == 0, which looks like a valid,
+		 * zero-length successful lookup to every caller. Treat it as
+		 * the error it is instead of letting a 0-length "mapped"
+		 * extent reach hfsplus_map_extent()'s iomap caller, where it
+		 * would be handed to generic iomap code as a successful
+		 * zero-length IOMAP_MAPPED result (iomap_iter_done() asserts
+		 * offset+length must extend past pos, which a zero-length
+		 * mapping never does).
+		 */
+		if (!*max_blocks)
+			return -EIO;
 		return 0;
 	}
 
@@ -302,6 +319,10 @@ int hfsplus_map_extent(struct inode *inode, u32 ablock, int create,
 
 	if (was_dirty)
 		mark_inode_dirty(inode);
+
+	/* Same "not actually covered by this extent record" case as above. */
+	if (!*max_blocks)
+		return -EIO;
 
 	return 0;
 }

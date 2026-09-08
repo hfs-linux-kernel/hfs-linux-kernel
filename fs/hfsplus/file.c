@@ -154,14 +154,15 @@ static ssize_t hfsplus_fallback_buffered_write(struct kiocb *iocb,
 }
 
 static ssize_t hfsplus_dio_write_iter(struct kiocb *iocb,
-					struct iov_iter *from)
+					struct iov_iter *from,
+					unsigned int dio_flags)
 {
 	ssize_t ret;
 
 	ret = iomap_dio_rw(iocb, from,
 			   &hfsplus_write_iomap_ops,
 			   &hfsplus_write_dio_ops,
-			   0, NULL, 0);
+			   dio_flags, NULL, 0);
 	if (ret == -ENOTBLK)
 		ret = 0;
 	else if (ret < 0)
@@ -209,14 +210,22 @@ static ssize_t hfsplus_file_write_iter(struct kiocb *iocb,
 
 	if (iocb->ki_pos > i_size_read(inode)) {
 		loff_t old_size = i_size_read(inode);
-		loff_t new_size = iocb->ki_pos;
 
-		if (iocb->ki_flags & IOCB_DIRECT) {
-			new_size = max_t(loff_t, new_size,
-					  HFSPLUS_I(inode)->phys_size);
-		}
-
-		i_size_write(inode, new_size);
+		/*
+		 * Do not promote the new i_size to HFSPLUS_I(inode)->phys_size
+		 * here: phys_size is legitimately allowed to sit ahead of
+		 * i_size, rounded up to the end of the last block a prior
+		 * extending truncate created, and that gap is not part of the
+		 * file. i_size must become exactly iocb->ki_pos, matching what
+		 * hfsplus_iomap_cont_expand() below zero-fills up to; the
+		 * generic iomap_dio_end_io() completion path (hooked up as
+		 * hfsplus_write_dio_ops.end_io) then correctly extends i_size
+		 * further, to this write's exact end, once its data actually
+		 * lands. A prior version of this code promoted i_size to
+		 * phys_size here too, silently growing the file past
+		 * iocb->ki_pos into that rounding gap.
+		 */
+		i_size_write(inode, iocb->ki_pos);
 		err = hfsplus_iomap_cont_expand(inode, iocb->ki_pos);
 		if (err) {
 			i_size_write(inode, old_size);
@@ -224,15 +233,60 @@ static ssize_t hfsplus_file_write_iter(struct kiocb *iocb,
 			goto unlock;
 		}
 		mark_inode_dirty(inode);
-	} else if ((iocb->ki_flags & IOCB_DIRECT) &&
-		   HFSPLUS_I(inode)->phys_size > i_size_read(inode)) {
-		i_size_write(inode, HFSPLUS_I(inode)->phys_size);
-		mark_inode_dirty(inode);
 	}
 
-	if (iocb->ki_flags & IOCB_DIRECT)
-		ret = hfsplus_dio_write_iter(iocb, iter);
-	else {
+	/*
+	 * Do not otherwise touch i_size here just because
+	 * HFSPLUS_I(inode)->phys_size > i_size_read(inode) and this is a
+	 * direct write: phys_size is legitimately allowed to sit ahead of
+	 * i_size, rounded up to the end of the last block a prior extending
+	 * truncate created. That gap is not part of the file; nothing about
+	 * an unrelated, fully in-bounds write justifies exposing it.
+	 *
+	 * IOCB_DIRECT is not a reliable signal that this is a deliberate
+	 * direct write to begin with: copy_file_range() on a file with no
+	 * ->copy_file_range/->remap_file_range falls back to
+	 * do_splice_direct() -> iter_file_splice_write(), whose kiocb
+	 * inherits IOCB_DIRECT from the destination fd's flags regardless
+	 * of how small or in-bounds the copy is. A prior version of this
+	 * function promoted i_size to phys_size in that case too, silently
+	 * growing the file past what the copy actually touched.
+	 */
+
+	if (iocb->ki_flags & IOCB_DIRECT) {
+		unsigned int dio_flags = 0;
+
+		/*
+		 * __hfsplus_iomap_begin() decides IOMAP_F_NEW (and hence
+		 * whether the generic iomap direct-I/O code will zero-fill
+		 * the unwritten tail of a partially-written block) by
+		 * comparing against hip->phys_size, which only advances at
+		 * I/O completion. Two direct writes to the same inode that
+		 * are both in flight at once can each reach a block neither
+		 * has finished populating yet, each see it as new, and each
+		 * try to zero-fill the part they don't personally cover --
+		 * racing against the other write's real data for those same
+		 * bytes, with whichever completes last silently winning.
+		 *
+		 * inode_lock already serializes entry to this function per
+		 * inode, so the mapping decisions above never race with each
+		 * other. The gap is that this function normally returns (and
+		 * releases inode_lock) as soon as the write is submitted,
+		 * without waiting for it to actually complete and advance
+		 * phys_size. Forcing a synchronous wait here for any write
+		 * that reaches past the current phys_size closes that gap:
+		 * the next write can't even start deciding IOMAP_F_NEW for
+		 * this inode until this one's completion has genuinely
+		 * updated phys_size. Writes that stay within the existing
+		 * phys_size can never hit IOMAP_F_NEW in the first place, so
+		 * they keep full async concurrency.
+		 */
+		if (iocb->ki_pos + iov_iter_count(iter) >
+		    HFSPLUS_I(inode)->phys_size)
+			dio_flags |= IOMAP_DIO_FORCE_WAIT;
+
+		ret = hfsplus_dio_write_iter(iocb, iter, dio_flags);
+	} else {
 		ret = iomap_file_buffered_write(iocb, iter,
 						&hfsplus_write_iomap_ops,
 						NULL, NULL);
