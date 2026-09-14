@@ -614,7 +614,8 @@ void hfsplus_file_truncate(struct inode *inode)
 
 	if (inode->i_size > hip->phys_size) {
 		if (S_ISREG(inode->i_mode)) {
-			res = hfsplus_iomap_cont_expand(inode, inode->i_size);
+			res = hfsplus_iomap_cont_expand(inode, hip->phys_size,
+							inode->i_size);
 			if (res)
 				return;
 

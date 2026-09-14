@@ -288,7 +288,8 @@ static int hfsplus_setattr(struct mnt_idmap *idmap,
 			loff_t old_size = inode->i_size;
 
 			i_size_write(inode, attr->ia_size);
-			error = hfsplus_iomap_cont_expand(inode, attr->ia_size);
+			error = hfsplus_iomap_cont_expand(inode, old_size,
+							  attr->ia_size);
 			if (error) {
 				i_size_write(inode, old_size);
 				return error;

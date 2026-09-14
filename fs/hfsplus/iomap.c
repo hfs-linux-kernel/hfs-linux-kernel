@@ -137,18 +137,28 @@ const struct iomap_ops hfsplus_write_iomap_ops = {
 /*
  * hfsplus_iomap_cont_expand()
  *
- * Zero-extend the backing store from the current phys_size up to 'size'.
- * Used both by hfsplus_setattr() and by hfsplus_file_truncate().
+ * Zero the byte range [from, to) of a file that is being extended, where
+ * 'from' is the old end-of-file and 'to' the new one. Used by the extending
+ * write path, hfsplus_setattr() (truncate up) and hfsplus_file_truncate().
+ *
+ * Zeroing has to start at the old i_size, not at hip->phys_size. When the
+ * final block of the file was freshly allocated, hfsplus_write_iomap_end()
+ * rounds hip->phys_size up to the end of that block, so [old_i_size,
+ * phys_size) is real, allocated backing store that sits past EOF. A shared
+ * writable mmap of the last page lets user space dirty those post-EOF bytes
+ * in the page cache (fsx's -e "EOF pollution" mode does exactly this). If we
+ * only zeroed from phys_size onward, that stale tail would survive the
+ * extend and later read back as non-zero instead of as part of the hole.
+ *
+ * iomap_zero_range() with the allocating write ops zeroes the already-backed
+ * [from, phys_size) portion in place and allocates + zeroes the rest.
  */
-int hfsplus_iomap_cont_expand(struct inode *inode, loff_t size)
+int hfsplus_iomap_cont_expand(struct inode *inode, loff_t from, loff_t to)
 {
-	struct hfsplus_inode_info *hip = HFSPLUS_I(inode);
-	loff_t start = hip->phys_size;
-
-	if (size <= start)
+	if (to <= from)
 		return 0;
 
-	return iomap_zero_range(inode, start, size - start, NULL,
+	return iomap_zero_range(inode, from, to - from, NULL,
 				&hfsplus_write_iomap_ops, NULL, NULL);
 }
 
