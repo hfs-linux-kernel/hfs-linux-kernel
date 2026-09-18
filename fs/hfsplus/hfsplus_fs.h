@@ -486,11 +486,6 @@ void hfsplus_mark_mdb_dirty(struct super_block *sb);
 void hfsplus_prepare_volume_header_for_commit(struct hfsplus_vh *vhdr);
 int hfsplus_commit_superblock(struct super_block *sb);
 
-/* tables.c */
-extern u16 hfsplus_case_fold_table[];
-extern u16 hfsplus_decompose_table[];
-extern u16 hfsplus_compose_table[];
-
 /* unicode.c */
 int hfsplus_strcasecmp(const struct hfsplus_unistr *s1,
 		       const struct hfsplus_unistr *s2);
