@@ -418,11 +418,16 @@ int hfsplus_cat_build_key(struct super_block *sb, hfsplus_btree_key *key,
 			   u32 parent, const struct qstr *str);
 void hfsplus_cat_build_key_with_cnid(struct super_block *sb,
 				     hfsplus_btree_key *key, u32 parent);
+void hfsplus_cat_build_key_uni(hfsplus_btree_key *key, u32 parent,
+			       const struct hfsplus_unistr *name);
 void hfsplus_cat_set_perms(struct inode *inode, struct hfsplus_perm *perms);
 int hfsplus_find_cat(struct super_block *sb, u32 cnid,
 		     struct hfs_find_data *fd);
 int hfsplus_create_cat(u32 cnid, struct inode *dir, const struct qstr *str,
 		       struct inode *inode);
+int hfsplus_create_cat_uni(u32 cnid, struct inode *dir,
+			   const struct hfsplus_unistr *name,
+			   struct inode *inode);
 int hfsplus_delete_cat(u32 cnid, struct inode *dir, const struct qstr *str);
 int hfsplus_rename_cat(u32 cnid, struct inode *src_dir, const struct qstr *src_name,
 		       struct inode *dst_dir, const struct qstr *dst_name);

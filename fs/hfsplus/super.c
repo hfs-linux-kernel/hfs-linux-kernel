@@ -400,17 +400,40 @@ static int hfsplus_statfs(struct dentry *dentry, struct kstatfs *buf)
 }
 
 /*
+ * On-disk Unicode name of the hidden directory: four U+0000 (NUL)
+ * followed by "HFS+ Private Data". HFSP_HIDDENDIR_NAME is the Linux
+ * representation of this name, where every NUL is replaced by U+2400
+ * (SYMBOL FOR NULL). The catalog key of the hidden directory must not
+ * depend on the nls table of the mount.
+ */
+static const struct hfsplus_unistr hfsplus_hidden_dir_name = {
+	.length = cpu_to_be16(21),
+	.unicode = {
+		cpu_to_be16(0), cpu_to_be16(0),
+		cpu_to_be16(0), cpu_to_be16(0),
+		cpu_to_be16('H'), cpu_to_be16('F'), cpu_to_be16('S'),
+		cpu_to_be16('+'), cpu_to_be16(' '),
+		cpu_to_be16('P'), cpu_to_be16('r'), cpu_to_be16('i'),
+		cpu_to_be16('v'), cpu_to_be16('a'), cpu_to_be16('t'),
+		cpu_to_be16('e'), cpu_to_be16(' '),
+		cpu_to_be16('D'), cpu_to_be16('a'), cpu_to_be16('t'),
+		cpu_to_be16('a'),
+	},
+};
+
+/*
  * Create the hidden directory that keeps the indirect node files
  * of hard links. The caller is responsible for cancelling the
  * delayed sync work, if it is required. On failure, @cat_damaged is
  * set to true if the catalog file could be left in inconsistent state.
  */
 static int hfsplus_create_hidden_dir(struct super_block *sb,
-				     const struct qstr *str,
 				     bool *cat_damaged)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	struct inode *root = d_inode(sb->s_root);
+	const struct qstr str = QSTR_INIT(HFSP_HIDDENDIR_NAME,
+					  sizeof(HFSP_HIDDENDIR_NAME) - 1);
 	struct inode *inode;
 	int err;
 
@@ -423,15 +446,17 @@ static int hfsplus_create_hidden_dir(struct super_block *sb,
 		goto out_unlock;
 	}
 
-	err = hfsplus_create_cat(inode->i_ino, root, str, inode);
+	err = hfsplus_create_cat_uni(inode->i_ino, root,
+				     &hfsplus_hidden_dir_name, inode);
 	if (err)
 		goto out_put_inode;
 
-	err = hfsplus_init_security(inode, root, str);
+	err = hfsplus_init_security(inode, root, &str);
 	if (err == -EOPNOTSUPP)
 		err = 0; /* Operation is not supported. */
 	else if (err) {
-		if (hfsplus_delete_cat(inode->i_ino, root, str)) {
+		/* The name is taken from the thread record. */
+		if (hfsplus_delete_cat(inode->i_ino, root, NULL)) {
 			pr_err("unable to remove hidden directory record\n");
 			*cat_damaged = true;
 		}
@@ -520,11 +545,9 @@ static int hfsplus_reconfigure(struct fs_context *fc)
 	 * It could be absent if the volume was mounted read-only.
 	 */
 	if (!sbi->hidden_dir) {
-		struct qstr str = QSTR_INIT(HFSP_HIDDENDIR_NAME,
-					    sizeof(HFSP_HIDDENDIR_NAME) - 1);
 		bool cat_damaged;
 
-		err = hfsplus_create_hidden_dir(sb, &str, &cat_damaged);
+		err = hfsplus_create_hidden_dir(sb, &cat_damaged);
 		if (err) {
 			pr_err("unable to create hidden directory: err %d\n",
 			       err);
@@ -562,7 +585,6 @@ void hfsplus_prepare_volume_header_for_commit(struct hfsplus_vh *vhdr)
 }
 
 static inline int hfsplus_get_hidden_dir_entry(struct super_block *sb,
-					       const struct qstr *str,
 					       hfsplus_cat_entry *entry)
 {
 	struct hfs_find_data fd;
@@ -572,15 +594,13 @@ static inline int hfsplus_get_hidden_dir_entry(struct super_block *sb,
 	if (unlikely(err))
 		return err;
 
-	err = hfsplus_cat_build_key(sb, fd.search_key, HFSPLUS_ROOT_CNID, str);
-	if (unlikely(err))
-		goto free_fd;
+	hfsplus_cat_build_key_uni(fd.search_key, HFSPLUS_ROOT_CNID,
+				  &hfsplus_hidden_dir_name);
 
 	err = hfsplus_brec_read_cat(&fd, entry);
 	if (err)
 		err = -ENOENT;
 
-free_fd:
 	hfs_find_exit(&fd);
 	return err;
 }
@@ -591,8 +611,6 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	hfsplus_cat_entry entry;
 	struct inode *root, *inode;
-	struct qstr str;
-	struct nls_table *nls;
 	u64 last_fs_block, last_fs_page;
 	int silent = fc->sb_flags & SB_SILENT;
 	int err;
@@ -610,19 +628,11 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 			sbi->nls = load_nls_default();
 	}
 
-	/* temporarily use utf8 to correctly find the hidden dir below */
-	nls = sbi->nls;
-	sbi->nls = load_nls("utf8");
-	if (!sbi->nls) {
-		pr_err("unable to load nls for utf8\n");
-		goto out_unload_nls;
-	}
-
 	/* Grab the volume header */
 	if (hfsplus_read_wrapper(sb)) {
 		if (!silent)
 			pr_warn("unable to find HFS+ superblock\n");
-		goto out_unload_nls;
+		return err;
 	}
 	vhdr = sbi->s_vhdr;
 
@@ -723,9 +733,7 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto out_put_alloc_file;
 	}
 
-	str = (struct qstr)QSTR_INIT(HFSP_HIDDENDIR_NAME,
-				     sizeof(HFSP_HIDDENDIR_NAME) - 1);
-	err = hfsplus_get_hidden_dir_entry(sb, &str, &entry);
+	err = hfsplus_get_hidden_dir_entry(sb, &entry);
 	if (err == -ENOENT) {
 		/*
 		 * Hidden directory is absent or it cannot be read.
@@ -756,14 +764,12 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (!sbi->hidden_dir) {
 			bool cat_damaged;
 
-			err = hfsplus_create_hidden_dir(sb, &str, &cat_damaged);
+			err = hfsplus_create_hidden_dir(sb, &cat_damaged);
 			if (err)
 				goto out_cancel_sync_work;
 		}
 	}
 
-	unload_nls(sbi->nls);
-	sbi->nls = nls;
 	return 0;
 
 out_cancel_sync_work:
@@ -782,8 +788,6 @@ out_close_ext_tree:
 out_free_vhdr:
 	kfree(sbi->s_vhdr_buf);
 	kfree(sbi->s_backup_vhdr_buf);
-out_unload_nls:
-	unload_nls(nls);
 	return err;
 }
 
