@@ -326,6 +326,39 @@ static void delayed_free(struct rcu_head *p)
 	kfree(sbi);
 }
 
+static void hfsplus_prepare_volume_header_for_unmount(struct hfsplus_vh *vhdr)
+{
+	vhdr->modify_date = hfsp_now2mt();
+	vhdr->attributes |= cpu_to_be32(HFSPLUS_VOL_UNMNT);
+	vhdr->attributes &= cpu_to_be32(~HFSPLUS_VOL_INCNSTNT);
+}
+
+/*
+ * Flush everything and mark the volume as cleanly unmounted on disk.
+ * It is used on unmount and on transition into read-only state.
+ */
+static int hfsplus_commit_clean_volume_header(struct super_block *sb)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
+
+	/*
+	 * The pending delayed sync is not needed anymore because
+	 * hfsplus_sync_fs() is called below. The work_queued is reset
+	 * only by delayed_sync_fs() itself, so reset it here too.
+	 * Otherwise, hfsplus_mark_mdb_dirty() never queues the work again.
+	 */
+	cancel_delayed_work_sync(&sbi->sync_work);
+	spin_lock(&sbi->work_lock);
+	sbi->work_queued = 0;
+	spin_unlock(&sbi->work_lock);
+
+	mutex_lock(&sbi->vh_mutex);
+	hfsplus_prepare_volume_header_for_unmount(sbi->s_vhdr);
+	mutex_unlock(&sbi->vh_mutex);
+
+	return hfsplus_sync_fs(sb, 1);
+}
+
 static void hfsplus_put_super(struct super_block *sb)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
@@ -334,15 +367,8 @@ static void hfsplus_put_super(struct super_block *sb)
 
 	cancel_delayed_work_sync(&sbi->sync_work);
 
-	if (!sb_rdonly(sb) && sbi->s_vhdr) {
-		struct hfsplus_vh *vhdr = sbi->s_vhdr;
-
-		vhdr->modify_date = hfsp_now2mt();
-		vhdr->attributes |= cpu_to_be32(HFSPLUS_VOL_UNMNT);
-		vhdr->attributes &= cpu_to_be32(~HFSPLUS_VOL_INCNSTNT);
-
-		hfsplus_sync_fs(sb, 1);
-	}
+	if (!sb_rdonly(sb) && sbi->s_vhdr)
+		hfsplus_commit_clean_volume_header(sb);
 
 	iput(sbi->alloc_file);
 	iput(sbi->hidden_dir);
@@ -373,35 +399,145 @@ static int hfsplus_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return 0;
 }
 
+/*
+ * Create the hidden directory that keeps the indirect node files
+ * of hard links. The caller is responsible for cancelling the
+ * delayed sync work, if it is required. On failure, @cat_damaged is
+ * set to true if the catalog file could be left in inconsistent state.
+ */
+static int hfsplus_create_hidden_dir(struct super_block *sb,
+				     const struct qstr *str,
+				     bool *cat_damaged)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
+	struct inode *root = d_inode(sb->s_root);
+	struct inode *inode;
+	int err;
+
+	*cat_damaged = false;
+
+	mutex_lock(&sbi->vh_mutex);
+	inode = hfsplus_new_inode(sb, root, S_IFDIR);
+	if (!inode) {
+		err = -ENOMEM;
+		goto out_unlock;
+	}
+
+	err = hfsplus_create_cat(inode->i_ino, root, str, inode);
+	if (err)
+		goto out_put_inode;
+
+	err = hfsplus_init_security(inode, root, str);
+	if (err == -EOPNOTSUPP)
+		err = 0; /* Operation is not supported. */
+	else if (err) {
+		if (hfsplus_delete_cat(inode->i_ino, root, str)) {
+			pr_err("unable to remove hidden directory record\n");
+			*cat_damaged = true;
+		}
+		goto out_put_inode;
+	}
+
+	sbi->hidden_dir = inode;
+	mutex_unlock(&sbi->vh_mutex);
+
+	hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb), HFSPLUS_I_CAT_DIRTY);
+	hfsplus_mark_inode_dirty(inode, HFSPLUS_I_CAT_DIRTY);
+	return 0;
+
+out_put_inode:
+	clear_nlink(inode);
+	hfsplus_delete_inode(inode);
+	iput(inode);
+out_unlock:
+	mutex_unlock(&sbi->vh_mutex);
+	return err;
+}
+
 static int hfsplus_reconfigure(struct fs_context *fc)
 {
 	struct super_block *sb = fc->root->d_sb;
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
+	struct hfsplus_vh *vhdr = sbi->s_vhdr;
+	int err;
 
 	sync_filesystem(sb);
 	if ((bool)(fc->sb_flags & SB_RDONLY) == sb_rdonly(sb))
 		return 0;
-	if (!(fc->sb_flags & SB_RDONLY)) {
-		struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
-		struct hfsplus_vh *vhdr = sbi->s_vhdr;
 
-		if (!(vhdr->attributes & cpu_to_be32(HFSPLUS_VOL_UNMNT))) {
-			pr_warn("filesystem was not cleanly unmounted, running fsck.hfsplus is recommended.  leaving read-only.\n");
-			sb->s_flags |= SB_RDONLY;
-			fc->sb_flags |= SB_RDONLY;
-		} else if (test_bit(HFSPLUS_SB_FORCE, &sbi->flags)) {
-			/* nothing */
-		} else if (vhdr->attributes &
-				cpu_to_be32(HFSPLUS_VOL_SOFTLOCK)) {
-			pr_warn("filesystem is marked locked, leaving read-only.\n");
-			sb->s_flags |= SB_RDONLY;
-			fc->sb_flags |= SB_RDONLY;
-		} else if (vhdr->attributes &
-				cpu_to_be32(HFSPLUS_VOL_JOURNALED)) {
-			pr_warn("filesystem is marked journaled, leaving read-only.\n");
-			sb->s_flags |= SB_RDONLY;
-			fc->sb_flags |= SB_RDONLY;
+	if (fc->sb_flags & SB_RDONLY) {
+		/*
+		 * Transition from read-write into read-only state.
+		 * hfsplus_put_super() will not touch the volume header
+		 * of read-only mounted volume. So, the volume should be
+		 * marked as cleanly unmounted here. Otherwise, it keeps
+		 * the HFSPLUS_VOL_INCNSTNT flag after unmount.
+		 */
+		err = hfsplus_commit_clean_volume_header(sb);
+		if (err) {
+			pr_err("unable to commit volume header: err %d\n",
+			       err);
+			mutex_lock(&sbi->vh_mutex);
+			hfsplus_prepare_volume_header_for_commit(vhdr);
+			mutex_unlock(&sbi->vh_mutex);
+			return err;
+		}
+		return 0;
+	}
+
+	if (!(vhdr->attributes & cpu_to_be32(HFSPLUS_VOL_UNMNT))) {
+		pr_warn("filesystem was not cleanly unmounted, running fsck.hfsplus is recommended.  leaving read-only.\n");
+		sb->s_flags |= SB_RDONLY;
+		fc->sb_flags |= SB_RDONLY;
+	} else if (test_bit(HFSPLUS_SB_FORCE, &sbi->flags)) {
+		/* nothing */
+	} else if (vhdr->attributes &
+			cpu_to_be32(HFSPLUS_VOL_SOFTLOCK)) {
+		pr_warn("filesystem is marked locked, leaving read-only.\n");
+		sb->s_flags |= SB_RDONLY;
+		fc->sb_flags |= SB_RDONLY;
+	} else if (vhdr->attributes &
+			cpu_to_be32(HFSPLUS_VOL_JOURNALED)) {
+		pr_warn("filesystem is marked journaled, leaving read-only.\n");
+		sb->s_flags |= SB_RDONLY;
+		fc->sb_flags |= SB_RDONLY;
+	}
+
+	if (fc->sb_flags & SB_RDONLY)
+		return 0;
+
+	/*
+	 * Transition from read-only into read-write state.
+	 * Mark the volume as being in use before any modification.
+	 */
+	mutex_lock(&sbi->vh_mutex);
+	hfsplus_prepare_volume_header_for_commit(vhdr);
+	mutex_unlock(&sbi->vh_mutex);
+	hfsplus_sync_fs(sb, 1);
+
+	/*
+	 * Hidden directory is required for link/unlink/rename.
+	 * It could be absent if the volume was mounted read-only.
+	 */
+	if (!sbi->hidden_dir) {
+		struct qstr str = QSTR_INIT(HFSP_HIDDENDIR_NAME,
+					    sizeof(HFSP_HIDDENDIR_NAME) - 1);
+		bool cat_damaged;
+
+		err = hfsplus_create_hidden_dir(sb, &str, &cat_damaged);
+		if (err) {
+			pr_err("unable to create hidden directory: err %d\n",
+			       err);
+			/*
+			 * Volume stays read-only. Revert the volume header
+			 * state if the catalog file has not been damaged.
+			 */
+			if (!cat_damaged)
+				hfsplus_commit_clean_volume_header(sb);
+			return err;
 		}
 	}
+
 	return 0;
 }
 
@@ -587,8 +723,8 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto out_put_alloc_file;
 	}
 
-	str.len = sizeof(HFSP_HIDDENDIR_NAME) - 1;
-	str.name = HFSP_HIDDENDIR_NAME;
+	str = (struct qstr)QSTR_INIT(HFSP_HIDDENDIR_NAME,
+				     sizeof(HFSP_HIDDENDIR_NAME) - 1);
 	err = hfsplus_get_hidden_dir_entry(sb, &str, &entry);
 	if (err == -ENOENT) {
 		/*
@@ -618,40 +754,11 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 		hfsplus_sync_fs(sb, 1);
 
 		if (!sbi->hidden_dir) {
-			mutex_lock(&sbi->vh_mutex);
-			sbi->hidden_dir = hfsplus_new_inode(sb, root, S_IFDIR);
-			if (!sbi->hidden_dir) {
-				mutex_unlock(&sbi->vh_mutex);
-				err = -ENOMEM;
-				goto out_put_root;
-			}
-			err = hfsplus_create_cat(sbi->hidden_dir->i_ino, root,
-						 &str, sbi->hidden_dir);
-			if (err) {
-				mutex_unlock(&sbi->vh_mutex);
-				goto out_put_hidden_dir;
-			}
+			bool cat_damaged;
 
-			err = hfsplus_init_security(sbi->hidden_dir,
-							root, &str);
-			if (err == -EOPNOTSUPP)
-				err = 0; /* Operation is not supported. */
-			else if (err) {
-				/*
-				 * Try to delete anyway without
-				 * error analysis.
-				 */
-				hfsplus_delete_cat(sbi->hidden_dir->i_ino,
-							root, &str);
-				mutex_unlock(&sbi->vh_mutex);
-				goto out_put_hidden_dir;
-			}
-
-			mutex_unlock(&sbi->vh_mutex);
-			hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb),
-						 HFSPLUS_I_CAT_DIRTY);
-			hfsplus_mark_inode_dirty(sbi->hidden_dir,
-						 HFSPLUS_I_CAT_DIRTY);
+			err = hfsplus_create_hidden_dir(sb, &str, &cat_damaged);
+			if (err)
+				goto out_cancel_sync_work;
 		}
 	}
 
@@ -659,9 +766,8 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbi->nls = nls;
 	return 0;
 
-out_put_hidden_dir:
+out_cancel_sync_work:
 	cancel_delayed_work_sync(&sbi->sync_work);
-	iput(sbi->hidden_dir);
 out_put_root:
 	dput(sb->s_root);
 	sb->s_root = NULL;
