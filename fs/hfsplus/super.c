@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/vfs.h>
 #include <linux/nls.h>
+#include <kunit/visibility.h>
 
 static struct inode *hfsplus_alloc_inode(struct super_block *sb);
 static void hfsplus_free_inode(struct inode *inode);
@@ -406,7 +407,7 @@ static int hfsplus_statfs(struct dentry *dentry, struct kstatfs *buf)
  * (SYMBOL FOR NULL). The catalog key of the hidden directory must not
  * depend on the nls table of the mount.
  */
-static const struct hfsplus_unistr hfsplus_hidden_dir_name = {
+const struct hfsplus_unistr hfsplus_hidden_dir_name = {
 	.length = cpu_to_be16(21),
 	.unicode = {
 		cpu_to_be16(0), cpu_to_be16(0),
@@ -420,6 +421,7 @@ static const struct hfsplus_unistr hfsplus_hidden_dir_name = {
 		cpu_to_be16('a'),
 	},
 };
+EXPORT_SYMBOL_IF_KUNIT(hfsplus_hidden_dir_name);
 
 /*
  * Create the hidden directory that keeps the indirect node files

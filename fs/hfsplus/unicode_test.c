@@ -1165,6 +1165,60 @@ static void hfsplus_asc2uni_legacy_seq_fixup_test(struct kunit *test)
 	free_mock_sb(mock_sb);
 }
 
+/*
+ * Test that the precomputed Unicode name of the hidden directory is
+ * exactly what hfsplus_asc2uni() produces from HFSP_HIDDENDIR_NAME
+ * with utf8 nls table. Otherwise, the catalog key of the hidden
+ * directory created or looked up by the driver will not match the key
+ * that macOS (and older versions of the driver) uses for this folder.
+ * The result must not depend on the decomposition setting either.
+ */
+static void hfsplus_hidden_dir_name_test(struct kunit *test)
+{
+	struct test_mock_sb *mock_sb;
+	struct hfsplus_unistr ustr;
+	const struct hfsplus_unistr *expected = &hfsplus_hidden_dir_name;
+	u16 len = be16_to_cpu(expected->length);
+	int result;
+
+	mock_sb = setup_mock_sb();
+	KUNIT_ASSERT_NOT_NULL(test, mock_sb);
+
+	mock_sb->nls.char2uni = test_char2uni_utf8;
+
+	KUNIT_EXPECT_EQ(test, 21, len);
+
+	/* Decomposition is enabled by default */
+	memset(&ustr, 0, sizeof(ustr));
+	result = hfsplus_asc2uni(&mock_sb->sb, &ustr, HFSPLUS_MAX_STRLEN,
+				 HFSP_HIDDENDIR_NAME,
+				 sizeof(HFSP_HIDDENDIR_NAME) - 1,
+				 HFS_REGULAR_NAME);
+
+	KUNIT_EXPECT_EQ(test, 0, result);
+	KUNIT_EXPECT_EQ(test, len, be16_to_cpu(ustr.length));
+	KUNIT_EXPECT_MEMEQ(test, expected->unicode, ustr.unicode,
+			   len * sizeof(ustr.unicode[0]));
+	KUNIT_EXPECT_EQ(test, 0, hfsplus_strcmp(expected, &ustr));
+
+	/* The same name with disabled decomposition */
+	set_bit(HFSPLUS_SB_NODECOMPOSE, &mock_sb->sb_info.flags);
+
+	memset(&ustr, 0, sizeof(ustr));
+	result = hfsplus_asc2uni(&mock_sb->sb, &ustr, HFSPLUS_MAX_STRLEN,
+				 HFSP_HIDDENDIR_NAME,
+				 sizeof(HFSP_HIDDENDIR_NAME) - 1,
+				 HFS_REGULAR_NAME);
+
+	KUNIT_EXPECT_EQ(test, 0, result);
+	KUNIT_EXPECT_EQ(test, len, be16_to_cpu(ustr.length));
+	KUNIT_EXPECT_MEMEQ(test, expected->unicode, ustr.unicode,
+			   len * sizeof(ustr.unicode[0]));
+	KUNIT_EXPECT_EQ(test, 0, hfsplus_strcmp(expected, &ustr));
+
+	free_mock_sb(mock_sb);
+}
+
 /* Mock dentry for testing hfsplus_hash_dentry */
 static struct dentry test_dentry;
 
@@ -1873,6 +1927,7 @@ static struct kunit_case hfsplus_unicode_test_cases[] = {
 	KUNIT_CASE(hfsplus_unicode_combining_reorder_roundtrip_test),
 	KUNIT_CASE(hfsplus_asc2uni_legacy_decomp_test),
 	KUNIT_CASE(hfsplus_asc2uni_legacy_seq_fixup_test),
+	KUNIT_CASE(hfsplus_hidden_dir_name_test),
 	KUNIT_CASE(hfsplus_hash_dentry_basic_test),
 	KUNIT_CASE(hfsplus_hash_dentry_casefold_test),
 	KUNIT_CASE(hfsplus_hash_dentry_special_chars_test),

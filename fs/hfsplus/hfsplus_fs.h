@@ -487,6 +487,7 @@ int hfs_part_find(struct super_block *sb, sector_t *part_start,
 		  sector_t *part_size);
 
 /* super.c */
+extern const struct hfsplus_unistr hfsplus_hidden_dir_name;
 struct inode *hfsplus_iget(struct super_block *sb, unsigned long ino);
 void hfsplus_mark_mdb_dirty(struct super_block *sb);
 void hfsplus_prepare_volume_header_for_commit(struct hfsplus_vh *vhdr);
