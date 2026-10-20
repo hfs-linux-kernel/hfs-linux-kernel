@@ -130,6 +130,28 @@ static int hfs_bmap_clear_bit(struct hfs_bnode *node, u32 node_bit_idx)
 	return 0;
 }
 
+/* Free all B*Tree nodes cached in the node hash */
+static void hfs_btree_free_nodes(struct hfs_btree *tree)
+{
+	struct hfs_bnode *node;
+	int i;
+
+	for (i = 0; i < NODE_HASH_SIZE; i++) {
+		spin_lock(&tree->hash_lock);
+		while ((node = tree->node_hash[i])) {
+			hfs_bnode_unhash(node);
+			spin_unlock(&tree->hash_lock);
+			if (atomic_read(&node->refcnt))
+				pr_err("node %d:%d still has %d user(s)!\n",
+				       node->tree->cnid, node->this,
+				       atomic_read(&node->refcnt));
+			hfs_bnode_free(node);
+			spin_lock(&tree->hash_lock);
+		}
+		spin_unlock(&tree->hash_lock);
+	}
+}
+
 /* Get a reference to a B*Tree and do some initial checks */
 struct hfs_btree *hfs_btree_open(struct super_block *sb, u32 id, btree_keycmp keycmp)
 {
@@ -293,6 +315,7 @@ put_folio:
 	folio_unlock(folio);
 	folio_put(folio);
 free_inode:
+	hfs_btree_free_nodes(tree);
 	tree->inode->i_mapping->a_ops = &hfs_aops;
 	iput(tree->inode);
 free_tree:
@@ -303,26 +326,10 @@ free_tree:
 /* Release resources used by a btree */
 void hfs_btree_close(struct hfs_btree *tree)
 {
-	struct hfs_bnode *node;
-	int i;
-
 	if (!tree)
 		return;
 
-	for (i = 0; i < NODE_HASH_SIZE; i++) {
-		spin_lock(&tree->hash_lock);
-		while ((node = tree->node_hash[i])) {
-			hfs_bnode_unhash(node);
-			spin_unlock(&tree->hash_lock);
-			if (atomic_read(&node->refcnt))
-				pr_err("node %d:%d still has %d user(s)!\n",
-				       node->tree->cnid, node->this,
-				       atomic_read(&node->refcnt));
-			hfs_bnode_free(node);
-			spin_lock(&tree->hash_lock);
-		}
-		spin_unlock(&tree->hash_lock);
-	}
+	hfs_btree_free_nodes(tree);
 	iput(tree->inode);
 	kfree(tree);
 }
