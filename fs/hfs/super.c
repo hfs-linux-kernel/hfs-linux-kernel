@@ -378,8 +378,10 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	res = -EINVAL;
 	root_inode = hfs_iget(sb, &fd.search_key->cat, &rec);
 	hfs_find_exit(&fd);
-	if (!root_inode)
+	if (IS_ERR(root_inode)) {
+		res = PTR_ERR(root_inode);
 		goto bail_no_root;
+	}
 
 	if (is_bad_inode(root_inode)) {
 		iput(root_inode);

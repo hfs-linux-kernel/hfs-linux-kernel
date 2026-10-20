@@ -35,8 +35,6 @@ static struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
 			inode = ERR_PTR(res);
 	} else {
 		inode = hfs_iget(dir->i_sb, &fd.search_key->cat, &rec);
-		if (!inode)
-			inode = ERR_PTR(-EACCES);
 	}
 	hfs_find_exit(&fd);
 	return d_splice_alias(inode, dentry);

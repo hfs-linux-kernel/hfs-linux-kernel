@@ -484,15 +484,6 @@ struct inode *hfs_system_iget(struct super_block *sb, u32 cnid)
 	return inode;
 }
 
-/*
- * __hfs_iget()
- *
- * Given the MDB for a HFS filesystem, a 'key' and an 'entry' in
- * the catalog B-tree and the 'type' of the desired file return the
- * inode for that file/directory or NULL.  Note that 'type' indicates
- * whether we want the actual file or directory, or the corresponding
- * metadata (AppleDouble header file or CAP metadata file).
- */
 struct inode *hfs_iget(struct super_block *sb, struct hfs_cat_key *key, hfs_cat_rec *rec)
 {
 	struct hfs_iget_data data = { key, rec };
@@ -507,15 +498,17 @@ struct inode *hfs_iget(struct super_block *sb, struct hfs_cat_key *key, hfs_cat_
 		cnid = be32_to_cpu(rec->file.FlNum);
 		break;
 	default:
-		return NULL;
+		return ERR_PTR(-EIO);
 	}
 
 	if (!hfs_is_valid_cnid(cnid, rec->type) ||
 	    hfs_is_system_reserved_cnid(cnid))
-		return NULL;
+		return ERR_PTR(-EIO);
 
 	inode = iget5_locked(sb, cnid, hfs_test_inode, hfs_read_inode, &data);
-	if (inode && (inode_state_read_once(inode) & I_NEW))
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+	if (inode_state_read_once(inode) & I_NEW)
 		unlock_new_inode(inode);
 	return inode;
 }
