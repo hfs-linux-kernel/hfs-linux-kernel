@@ -250,17 +250,84 @@ int hfs_cat_find_brec(struct super_block *sb, u32 cnid,
 	return hfs_cat_validate_found_cnid(fd, cnid);
 }
 
-static inline
-void hfs_set_next_unused_CNID(struct super_block *sb,
-				u32 deleted_cnid, u32 found_cnid)
+/*
+ * hfs_find_max_CNID()
+ *
+ * Find the biggest CNID of the file and folder records in Catalog Tree.
+ * Catalog records are sorted by parent CNID and name, so the record with
+ * the biggest CNID can be anywhere in the tree. Moreover, file thread
+ * records are optional in HFS. As a result, all leaf nodes have to be
+ * scanned.
+ */
+static
+int hfs_find_max_CNID(struct hfs_btree *cat_tree, u32 *max_cnid)
 {
-	if (found_cnid < HFS_FIRSTUSER_CNID) {
-		atomic64_cmpxchg(&HFS_SB(sb)->next_id,
-				 deleted_cnid + 1, HFS_FIRSTUSER_CNID);
-	} else {
-		atomic64_cmpxchg(&HFS_SB(sb)->next_id,
-				 deleted_cnid + 1, found_cnid + 1);
+	struct hfs_bnode *node;
+	u32 node_id = cat_tree->leaf_head;
+	u32 nodes_count = 0;
+
+	*max_cnid = 0;
+
+	while (node_id) {
+		int i;
+
+		if (++nodes_count > cat_tree->node_count) {
+			pr_err("leaf nodes chain is corrupted\n");
+			return -EIO;
+		}
+
+		node = hfs_bnode_find(cat_tree, node_id);
+		if (IS_ERR(node)) {
+			pr_err("fail to find leaf node: node ID %u\n",
+				node_id);
+			return PTR_ERR(node);
+		}
+
+		if (node->type != HFS_NODE_LEAF) {
+			pr_err("node is corrupted: node ID %u, type %d\n",
+				node_id, node->type);
+			hfs_bnode_put(node);
+			return -EIO;
+		}
+
+		for (i = 0; i < node->num_recs; i++) {
+			hfs_cat_rec rec;
+			u16 off, len, keylen;
+			int entrylength;
+			u32 found_cnid;
+
+			len = hfs_brec_lenoff(node, i, &off);
+			keylen = hfs_brec_keylen(node, i);
+			if (keylen == 0 || keylen >= len) {
+				pr_err("fail to get the keylen: node_id %u, record index %d\n",
+				       node_id, i);
+				hfs_bnode_put(node);
+				return -EIO;
+			}
+
+			entrylength = len - keylen;
+			if (entrylength > sizeof(rec))
+				entrylength = sizeof(rec);
+
+			memset(&rec, 0, sizeof(rec));
+			hfs_bnode_read(node, &rec, off + keylen, entrylength);
+
+			if (rec.type == HFS_CDR_DIR)
+				found_cnid = be32_to_cpu(rec.dir.DirID);
+			else if (rec.type == HFS_CDR_FIL)
+				found_cnid = be32_to_cpu(rec.file.FlNum);
+			else
+				continue;
+
+			if (found_cnid > *max_cnid)
+				*max_cnid = found_cnid;
+		}
+
+		node_id = node->next;
+		hfs_bnode_put(node);
 	}
+
+	return 0;
 }
 
 /*
@@ -271,11 +338,9 @@ void hfs_set_next_unused_CNID(struct super_block *sb,
 static
 int hfs_correct_next_unused_CNID(struct super_block *sb, u32 cnid)
 {
-	struct hfs_btree *cat_tree;
-	struct hfs_bnode *node;
-	s64 leaf_head;
-	s64 leaf_tail;
-	s64 node_id;
+	u32 max_cnid;
+	s64 next_id;
+	int err;
 
 	hfs_dbg("cnid %u, next_id %lld\n",
 		cnid, atomic64_read(&HFS_SB(sb)->next_id));
@@ -285,88 +350,16 @@ int hfs_correct_next_unused_CNID(struct super_block *sb, u32 cnid)
 		return 0;
 	}
 
-	cat_tree = HFS_SB(sb)->cat_tree;
-	leaf_head = cat_tree->leaf_head;
-	leaf_tail = cat_tree->leaf_tail;
+	err = hfs_find_max_CNID(HFS_SB(sb)->cat_tree, &max_cnid);
+	if (err)
+		return err;
 
-	if (leaf_head > leaf_tail) {
-		pr_err("node is corrupted: leaf_head %lld, leaf_tail %lld\n",
-			leaf_head, leaf_tail);
-		return -ERANGE;
-	}
+	hfs_dbg("max_cnid %u\n", max_cnid);
 
-	node = hfs_bnode_find(cat_tree, leaf_tail);
-	if (IS_ERR(node)) {
-		pr_err("fail to find leaf node: node ID %lld\n",
-			leaf_tail);
-		return -ENOENT;
-	}
+	next_id = max_t(s64, (s64)max_cnid + 1, HFS_FIRSTUSER_CNID);
+	atomic64_cmpxchg(&HFS_SB(sb)->next_id, (s64)cnid + 1, next_id);
 
-	node_id = leaf_tail;
-
-	do {
-		int i;
-
-		if (node_id != leaf_tail) {
-			node = hfs_bnode_find(cat_tree, node_id);
-			if (IS_ERR(node))
-				return -ENOENT;
-		}
-
-		hfs_dbg("node %lld, leaf_tail %lld, leaf_head %lld\n",
-			node_id, leaf_tail, leaf_head);
-
-		hfs_bnode_dump(node);
-
-		for (i = node->num_recs - 1; i >= 0; i--) {
-			hfs_cat_rec rec;
-			u16 off, len, keylen;
-			int entryoffset;
-			int entrylength;
-			u32 found_cnid;
-
-			len = hfs_brec_lenoff(node, i, &off);
-			keylen = hfs_brec_keylen(node, i);
-			if (keylen == 0) {
-				pr_err("fail to get the keylen: "
-					"node_id %lld, record index %d\n",
-					node_id, i);
-				return -EINVAL;
-			}
-
-			entryoffset = off + keylen;
-			entrylength = len - keylen;
-
-			if (entrylength > sizeof(rec)) {
-				pr_err("unexpected record length: "
-					"entrylength %d\n",
-					entrylength);
-				return -EINVAL;
-			}
-
-			hfs_bnode_read(node, &rec, entryoffset, entrylength);
-
-			if (rec.type == HFS_CDR_DIR) {
-				found_cnid = be32_to_cpu(rec.dir.DirID);
-				hfs_dbg("found_cnid %u\n", found_cnid);
-				hfs_set_next_unused_CNID(sb, cnid, found_cnid);
-				hfs_bnode_put(node);
-				return 0;
-			} else if (rec.type == HFS_CDR_FIL) {
-				found_cnid = be32_to_cpu(rec.file.FlNum);
-				hfs_dbg("found_cnid %u\n", found_cnid);
-				hfs_set_next_unused_CNID(sb, cnid, found_cnid);
-				hfs_bnode_put(node);
-				return 0;
-			}
-		}
-
-		node_id = node->prev;
-		hfs_bnode_put(node);
-
-	} while (node_id >= leaf_head);
-
-	return -ENOENT;
+	return 0;
 }
 
 /*
