@@ -370,6 +370,8 @@ int hfs_bmap_reserve(struct hfs_btree *tree, u32 rsvd_nodes)
 	u32 count;
 	int res;
 
+	lockdep_assert_held(&tree->tree_lock);
+
 	while (tree->free_nodes < rsvd_nodes) {
 		res = hfs_extend_file(inode);
 		if (res)
@@ -395,6 +397,8 @@ struct hfs_bnode *hfs_bmap_alloc(struct hfs_btree *tree)
 	u32 nidx, idx;
 	u8 *data, byte, m;
 	int i, res;
+
+	lockdep_assert_held(&tree->tree_lock);
 
 	res = hfs_bmap_reserve(tree, 1);
 	if (res)
@@ -474,6 +478,7 @@ void hfs_bmap_free(struct hfs_bnode *node)
 
 	hfs_dbg("node %u\n", node->this);
 	tree = node->tree;
+	lockdep_assert_held(&tree->tree_lock);
 	nidx = node->this;
 	node = hfs_bnode_find(tree, 0);
 	if (IS_ERR(node))
