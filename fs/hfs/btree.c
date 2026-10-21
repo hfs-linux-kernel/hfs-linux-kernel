@@ -426,6 +426,7 @@ struct hfs_bnode *hfs_bmap_alloc(struct hfs_btree *tree)
 						set_page_dirty(page);
 						kunmap_local(data);
 						tree->free_nodes--;
+						hfs_btree_write(tree);
 						mark_inode_dirty(tree->inode);
 						hfs_bnode_put(node);
 						return hfs_bnode_create(tree, idx);
@@ -446,6 +447,7 @@ struct hfs_bnode *hfs_bmap_alloc(struct hfs_btree *tree)
 		if (!nidx) {
 			printk(KERN_DEBUG "create new bmap node...\n");
 			next_node = hfs_bmap_new_bmap(node, idx);
+			hfs_btree_write(tree);
 		} else
 			next_node = hfs_bnode_find(tree, nidx);
 		hfs_bnode_put(node);
@@ -512,6 +514,7 @@ void hfs_bmap_free(struct hfs_bnode *node)
 			nidx, node->type);
 	} else {
 		tree->free_nodes++;
+		hfs_btree_write(tree);
 		mark_inode_dirty(tree->inode);
 	}
 
