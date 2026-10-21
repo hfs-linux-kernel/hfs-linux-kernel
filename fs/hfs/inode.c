@@ -468,6 +468,7 @@ int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct inode *main_inode = inode;
 	struct hfs_find_data fd;
+	struct hfs_btree *tree;
 	hfs_cat_rec rec;
 	int res;
 
@@ -481,10 +482,18 @@ int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 		case HFS_ROOT_CNID:
 			break;
 		case HFS_EXT_CNID:
-			hfs_btree_write(HFS_SB(inode->i_sb)->ext_tree);
+			tree = HFS_SB(inode->i_sb)->ext_tree;
+			mutex_lock_nested(&tree->tree_lock,
+					  EXTENTS_BTREE_MUTEX);
+			hfs_btree_write(tree);
+			mutex_unlock(&tree->tree_lock);
 			return 0;
 		case HFS_CAT_CNID:
-			hfs_btree_write(HFS_SB(inode->i_sb)->cat_tree);
+			tree = HFS_SB(inode->i_sb)->cat_tree;
+			mutex_lock_nested(&tree->tree_lock,
+					  CATALOG_BTREE_MUTEX);
+			hfs_btree_write(tree);
+			mutex_unlock(&tree->tree_lock);
 			return 0;
 		default:
 			BUG();
