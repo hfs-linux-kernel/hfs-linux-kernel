@@ -745,8 +745,14 @@ int hfs_inode_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		if (error)
 			return error;
 
-		truncate_setsize(inode, attr->ia_size);
-		hfs_file_truncate(inode);
+		if (attr->ia_size > inode->i_size) {
+			error = generic_cont_expand_simple(inode, attr->ia_size);
+			if (error)
+				return error;
+		} else {
+			truncate_setsize(inode, attr->ia_size);
+			hfs_file_truncate(inode);
+		}
 		inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 	}
 
