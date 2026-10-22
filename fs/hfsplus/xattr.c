@@ -837,13 +837,9 @@ ssize_t hfsplus_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	err = hfsplus_find_attr(inode->i_sb, inode->i_ino, NULL, &fd);
 	if (err) {
-		if (err == -ENOENT || err == -ENODATA) {
-			res = 0;
-			goto end_listxattr;
-		} else {
+		if (err != -ENOENT && err != -ENODATA)
 			res = err;
-			goto end_listxattr;
-		}
+		goto end_listxattr;
 	}
 
 	for (;;) {
