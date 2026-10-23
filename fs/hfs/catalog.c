@@ -35,14 +35,14 @@ void hfs_cat_build_key(struct super_block *sb, btree_key *key, u32 parent, const
 
 static int hfs_cat_build_record(hfs_cat_rec *rec, u32 cnid, struct inode *inode)
 {
-	__be32 mtime = hfs_mtime();
+	time64_t mtime = inode_get_mtime_sec(inode);
 
 	memset(rec, 0, sizeof(*rec));
 	if (S_ISDIR(inode->i_mode)) {
 		rec->type = HFS_CDR_DIR;
 		rec->dir.DirID = cpu_to_be32(cnid);
-		rec->dir.CrDat = mtime;
-		rec->dir.MdDat = mtime;
+		rec->dir.CrDat = __hfs_u_to_mtime(mtime);
+		hfs_cat_write_mtime(rec, mtime);
 		rec->dir.BkDat = 0;
 		rec->dir.UsrInfo.frView = cpu_to_be16(0xff);
 		return sizeof(struct hfs_cat_dir);
@@ -53,8 +53,8 @@ static int hfs_cat_build_record(hfs_cat_rec *rec, u32 cnid, struct inode *inode)
 		if (!(inode->i_mode & S_IWUSR))
 			rec->file.Flags |= HFS_FIL_LOCK;
 		rec->file.FlNum = cpu_to_be32(cnid);
-		rec->file.CrDat = mtime;
-		rec->file.MdDat = mtime;
+		rec->file.CrDat = __hfs_u_to_mtime(mtime);
+		hfs_cat_write_mtime(rec, mtime);
 		rec->file.BkDat = 0;
 		rec->file.UsrWds.fdType = HFS_SB(inode->i_sb)->s_type;
 		rec->file.UsrWds.fdCreator = HFS_SB(inode->i_sb)->s_creator;

@@ -19,6 +19,8 @@
 #include <linux/xattr.h>
 #include <linux/blkdev.h>
 #include <linux/fileattr.h>
+#include <linux/unaligned.h>
+#include <kunit/visibility.h>
 
 #include "hfs_fs.h"
 #include "btree.h"
@@ -350,12 +352,88 @@ static int hfs_test_inode(struct inode *inode, void *data)
 /*
  * hfs_read_inode
  */
+/*
+ * The spare bytes of the catalog record that keep the extended
+ * modification date: fdIconID and fdUnused[0..5] of the file record,
+ * Resrv[0..7] of the directory record.
+ */
+static void *hfs_cat_ext_mtime(hfs_cat_rec *rec)
+{
+	if (rec->type == HFS_CDR_DIR)
+		return rec->dir.Resrv;
+
+	return &rec->file.FndrInfo;
+}
+
+/*
+ * hfs_cat_read_mtime - get modification date of the catalog record
+ * @rec: file or directory catalog record
+ *
+ * If MdDat is equal to HFS_EXT_TIMESTAMP_MARK and the spare bytes
+ * contain the valid extended value, then the extended value is returned.
+ * Otherwise, the value of MdDat is returned.
+ */
+time64_t hfs_cat_read_mtime(hfs_cat_rec *rec)
+{
+	__be32 mt;
+	u64 ext_mt;
+
+	if (rec->type == HFS_CDR_DIR)
+		mt = rec->dir.MdDat;
+	else
+		mt = rec->file.MdDat;
+
+	if (hfs_mt_is_ext_timestamp(mt)) {
+		ext_mt = get_unaligned_be64(hfs_cat_ext_mtime(rec));
+		if (hfs_ext_mt_is_valid(ext_mt))
+			return __hfs_ext_m_to_utime(ext_mt);
+	}
+
+	return __hfs_m_to_utime(mt);
+}
+EXPORT_SYMBOL_IF_KUNIT(hfs_cat_read_mtime);
+
+/*
+ * hfs_cat_write_mtime - set modification date of the catalog record
+ * @rec: file or directory catalog record
+ * @ut: modification date (seconds since January 1, 1970)
+ *
+ * If @ut cannot be represented by MdDat, then HFS_EXT_TIMESTAMP_MARK
+ * is stored into MdDat and the real value is stored into the spare
+ * bytes of the record. The spare bytes are cleared only if they keep
+ * the stale extended value. Otherwise, they are left untouched because
+ * the record could be created by another implementation.
+ */
+void hfs_cat_write_mtime(hfs_cat_rec *rec, time64_t ut)
+{
+	__be32 *mt;
+	void *ext_mt = hfs_cat_ext_mtime(rec);
+	u64 value = __hfs_u_to_ext_mtime(ut);
+
+	if (rec->type == HFS_CDR_DIR)
+		mt = &rec->dir.MdDat;
+	else
+		mt = &rec->file.MdDat;
+
+	if (value > U32_MAX) {
+		*mt = HFS_EXT_TIMESTAMP_MARK;
+		put_unaligned_be64(value, ext_mt);
+		return;
+	}
+
+	if (hfs_mt_is_ext_timestamp(*mt) || value == U32_MAX)
+		memset(ext_mt, 0, HFS_EXT_TIMESTAMP_SIZE);
+
+	*mt = cpu_to_be32(value);
+}
+EXPORT_SYMBOL_IF_KUNIT(hfs_cat_write_mtime);
+
 static int hfs_read_inode(struct inode *inode, void *data)
 {
 	struct hfs_iget_data *idata = data;
 	struct hfs_sb_info *hsb = HFS_SB(inode->i_sb);
 	hfs_cat_rec *rec;
-	struct timespec64 mtime;
+	struct timespec64 mtime = {};
 
 	HFS_I(inode)->flags = 0;
 	HFS_I(inode)->rsrc_inode = NULL;
@@ -392,7 +470,7 @@ static int hfs_read_inode(struct inode *inode, void *data)
 			inode->i_mode |= S_IWUGO;
 		inode->i_mode &= ~hsb->s_file_umask;
 		inode->i_mode |= S_IFREG;
-		mtime = hfs_m_to_utime(rec->file.MdDat);
+		mtime.tv_sec = hfs_cat_read_mtime(rec);
 		inode_set_ctime_to_ts(inode, mtime);
 		inode_set_atime_to_ts(inode, mtime);
 		inode_set_mtime_to_ts(inode, mtime);
@@ -408,7 +486,7 @@ static int hfs_read_inode(struct inode *inode, void *data)
 		inode->i_size = be16_to_cpu(rec->dir.Val) + 2;
 		HFS_I(inode)->fs_blocks = 0;
 		inode->i_mode = S_IFDIR | (S_IRWXUGO & ~hsb->s_dir_umask);
-		mtime = hfs_m_to_utime(rec->dir.MdDat);
+		mtime.tv_sec = hfs_cat_read_mtime(rec);
 		inode_set_ctime_to_ts(inode, mtime);
 		inode_set_atime_to_ts(inode, mtime);
 		inode_set_mtime_to_ts(inode, mtime);
@@ -518,7 +596,7 @@ int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 		    be32_to_cpu(rec.dir.DirID) != inode->i_ino) {
 		}
 
-		rec.dir.MdDat = hfs_u_to_mtime(inode_get_mtime(inode));
+		hfs_cat_write_mtime(&rec, inode_get_mtime_sec(inode));
 		rec.dir.Val = cpu_to_be16(inode->i_size - 2);
 
 		hfs_bnode_write(fd.bnode, &rec, fd.entryoffset,
@@ -546,7 +624,7 @@ int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 		else
 			rec.file.Flags |= HFS_FIL_LOCK;
 		hfs_inode_write_fork(inode, rec.file.ExtRec, &rec.file.LgLen, &rec.file.PyLen);
-		rec.file.MdDat = hfs_u_to_mtime(inode_get_mtime(inode));
+		hfs_cat_write_mtime(&rec, inode_get_mtime_sec(inode));
 
 		hfs_bnode_write(fd.bnode, &rec, fd.entryoffset,
 			    sizeof(struct hfs_cat_file));

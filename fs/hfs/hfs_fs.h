@@ -214,6 +214,8 @@ extern void hfs_inode_write_fork(struct inode *inode, struct hfs_extent *ext,
 extern int hfs_write_inode(struct inode *inode, struct writeback_control *wbc);
 extern int hfs_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			     struct iattr *attr);
+time64_t hfs_cat_read_mtime(hfs_cat_rec *rec);
+void hfs_cat_write_mtime(hfs_cat_rec *rec, time64_t ut);
 extern void hfs_inode_read_fork(struct inode *inode, struct hfs_extent *ext,
 				__be32 __log_size, __be32 phys_size,
 				u32 clump_size);
@@ -280,11 +282,63 @@ static inline __be32 __hfs_u_to_mtime(time64_t ut)
 
 	return cpu_to_be32(lower_32_bits(ut));
 }
+
+/*
+ * Linux specific extension of HFS on-disk layout that makes possible
+ * to support timestamps after HFS_MAX_TIMESTAMP_SECS.
+ *
+ * If the modification date cannot be represented by the 32-bit on-disk
+ * field, then the maximal value (HFS_EXT_TIMESTAMP_MARK) is stored into
+ * MdDat of the catalog record and the real value is stored into
+ * the spare bytes of the same catalog record as big-endian 64-bit
+ * number of seconds since January 1, 1904 (local time):
+ *
+ *   file record:      FndrInfo.fdIconID and FndrInfo.fdUnused[0..5]
+ *   directory record: Resrv[0..7]
+ *
+ * fsck_hfs does not check these bytes. Another implementation that
+ * updates MdDat removes the mark. As a result, the stale value in
+ * the spare bytes is ignored.
+ */
+#define HFS_EXT_TIMESTAMP_MARK		cpu_to_be32(U32_MAX)
+#define HFS_EXT_TIMESTAMP_SIZE		sizeof(__be64)
+/* settimeofday() limits sys_tz.tz_minuteswest by +/-15 hours */
+#define HFS_MAX_TZ_SECS			(15 * 60 * 60)
+/* maximal 64-bit on-disk value that can be converted into time64_t */
+#define HFS_EXT_MAX_MAC_DATE		((u64)TIME64_MAX - HFS_MAX_TZ_SECS)
+#define HFS_EXT_MAX_TIMESTAMP_SECS	\
+	((time64_t)HFS_EXT_MAX_MAC_DATE - HFS_UTC_OFFSET - HFS_MAX_TZ_SECS)
+
+static inline bool hfs_mt_is_ext_timestamp(__be32 mt)
+{
+	return mt == HFS_EXT_TIMESTAMP_MARK;
+}
+
+static inline bool hfs_ext_mt_is_valid(u64 mt)
+{
+	return mt > U32_MAX && mt <= HFS_EXT_MAX_MAC_DATE;
+}
+
+static inline time64_t __hfs_ext_m_to_utime(u64 mt)
+{
+	time64_t ut = (time64_t)mt - HFS_UTC_OFFSET;
+
+	return ut + sys_tz.tz_minuteswest * 60;
+}
+
+static inline u64 __hfs_u_to_ext_mtime(time64_t ut)
+{
+	ut = clamp_t(time64_t, ut,
+		     HFS_MIN_TIMESTAMP_SECS - HFS_MAX_TZ_SECS,
+		     HFS_EXT_MAX_TIMESTAMP_SECS);
+	ut -= sys_tz.tz_minuteswest * 60;
+	ut += HFS_UTC_OFFSET;
+
+	return ut < 0 ? 0 : ut;
+}
 #define HFS_I(inode)	(container_of(inode, struct hfs_inode_info, vfs_inode))
 #define HFS_SB(sb)	((struct hfs_sb_info *)(sb)->s_fs_info)
 
-#define hfs_m_to_utime(time)   (struct timespec64){ .tv_sec = __hfs_m_to_utime(time) }
-#define hfs_u_to_mtime(time)   __hfs_u_to_mtime((time).tv_sec)
 #define hfs_mtime()		__hfs_u_to_mtime(ktime_get_real_seconds())
 
 static inline const char *hfs_mdb_name(struct super_block *sb)

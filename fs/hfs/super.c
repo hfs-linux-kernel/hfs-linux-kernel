@@ -348,7 +348,11 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_time_gran = NSEC_PER_SEC;
 	/* on-disk timestamps are in local time */
 	sb->s_time_min = HFS_MIN_TIMESTAMP_SECS + sys_tz.tz_minuteswest * 60;
-	sb->s_time_max = HFS_MAX_TIMESTAMP_SECS + sys_tz.tz_minuteswest * 60;
+	/*
+	 * Timestamps after HFS_MAX_TIMESTAMP_SECS are stored in
+	 * the spare bytes of the catalog record.
+	 */
+	sb->s_time_max = HFS_EXT_MAX_TIMESTAMP_SECS;
 	mutex_init(&sbi->mdb_lock);
 	mutex_init(&sbi->bitmap_lock);
 
