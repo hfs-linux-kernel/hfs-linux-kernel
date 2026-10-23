@@ -345,6 +345,10 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &hfs_super_operations;
 	sb->s_xattr = hfs_xattr_handlers;
 	sb->s_flags |= SB_NOATIME | SB_NODIRATIME;
+	sb->s_time_gran = NSEC_PER_SEC;
+	/* on-disk timestamps are in local time */
+	sb->s_time_min = HFS_MIN_TIMESTAMP_SECS + sys_tz.tz_minuteswest * 60;
+	sb->s_time_max = HFS_MAX_TIMESTAMP_SECS + sys_tz.tz_minuteswest * 60;
 	mutex_init(&sbi->mdb_lock);
 	mutex_init(&sbi->bitmap_lock);
 

@@ -255,9 +255,18 @@ extern int hfs_mac2asc(struct super_block *sb,
 /* super.c */
 extern void hfs_mark_mdb_dirty(struct super_block *sb);
 
+/*
+ * time helpers: convert between 1904-base and 1970-base timestamps
+ *
+ * HFS keeps timestamps as unsigned 32-bit number of seconds since
+ * January 1, 1904 in local time. The on-disk timestamps cover the range
+ * from HFS_MIN_TIMESTAMP_SECS (Jan. 1, 1904) till HFS_MAX_TIMESTAMP_SECS
+ * (Feb. 6, 2040) shifted by the local time zone offset. The timestamps
+ * out of this range are clamped.
+ */
 static inline time64_t __hfs_m_to_utime(__be32 mt)
 {
-	time64_t ut = (u32)(be32_to_cpu(mt) - HFS_UTC_OFFSET);
+	time64_t ut = (time64_t)be32_to_cpu(mt) - HFS_UTC_OFFSET;
 
 	return ut + sys_tz.tz_minuteswest * 60;
 }
@@ -265,8 +274,11 @@ static inline time64_t __hfs_m_to_utime(__be32 mt)
 static inline __be32 __hfs_u_to_mtime(time64_t ut)
 {
 	ut -= sys_tz.tz_minuteswest * 60;
+	ut = clamp_t(time64_t, ut,
+		     HFS_MIN_TIMESTAMP_SECS, HFS_MAX_TIMESTAMP_SECS);
+	ut += HFS_UTC_OFFSET;
 
-	return cpu_to_be32(lower_32_bits(ut) + HFS_UTC_OFFSET);
+	return cpu_to_be32(lower_32_bits(ut));
 }
 #define HFS_I(inode)	(container_of(inode, struct hfs_inode_info, vfs_inode))
 #define HFS_SB(sb)	((struct hfs_sb_info *)(sb)->s_fs_info)
