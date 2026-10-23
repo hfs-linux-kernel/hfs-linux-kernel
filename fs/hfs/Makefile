@@ -10,4 +10,4 @@ hfs-objs := bitmap.o bfind.o bnode.o brec.o btree.o \
             part_tbl.o string.o super.o sysdep.o trans.o
 
 # KUnit tests
-obj-$(CONFIG_HFS_KUNIT_TEST) += string_test.o
+obj-$(CONFIG_HFS_KUNIT_TEST) += string_test.o hfs_time_test.o
