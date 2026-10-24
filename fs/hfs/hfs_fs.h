@@ -254,6 +254,7 @@ extern int hfs_mac2asc(struct super_block *sb,
 
 /* super.c */
 extern void hfs_mark_mdb_dirty(struct super_block *sb);
+int hfs_sync_mdb(struct super_block *sb);
 
 /*
  * There are two time systems.  Both are based on seconds since

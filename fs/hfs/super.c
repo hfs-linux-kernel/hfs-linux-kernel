@@ -32,7 +32,15 @@ static struct kmem_cache *hfs_inode_cachep;
 MODULE_DESCRIPTION("Apple Macintosh file system support");
 MODULE_LICENSE("GPL");
 
-static int hfs_sync_fs(struct super_block *sb, int wait)
+/*
+ * hfs_sync_mdb()
+ *
+ * Write the in-core MDB and the dirty volume bitmap into the buffers.
+ * It is not allowed to wait for mdb_work here because the caller could
+ * be executed by WQ_MEM_RECLAIM workqueue (for example, the completion
+ * of AIO direct write with O_DSYNC calls ->fsync()).
+ */
+int hfs_sync_mdb(struct super_block *sb)
 {
 	int ret;
 
@@ -42,6 +50,11 @@ static int hfs_sync_fs(struct super_block *sb, int wait)
 	mutex_unlock(&HFS_SB(sb)->mdb_lock);
 
 	return ret;
+}
+
+static int hfs_sync_fs(struct super_block *sb, int wait)
+{
+	return hfs_sync_mdb(sb);
 }
 
 /*
@@ -71,10 +84,7 @@ static void flush_mdb(struct work_struct *work)
 	sbi->work_queued = 0;
 	spin_unlock(&sbi->work_lock);
 
-	mutex_lock(&sbi->mdb_lock);
-	is_hfs_cnid_counts_valid(sb);
-	hfs_mdb_commit(sb);
-	mutex_unlock(&sbi->mdb_lock);
+	hfs_sync_mdb(sb);
 }
 
 void hfs_mark_mdb_dirty(struct super_block *sb)
