@@ -40,8 +40,8 @@ int hfsplus_cat_bin_cmp_key(const hfsplus_btree_key *k1,
 }
 
 /* Generates key for catalog file/folders record. */
-int hfsplus_cat_build_key(struct super_block *sb,
-		hfsplus_btree_key *key, u32 parent, const struct qstr *str)
+int hfsplus_cat_build_key(struct super_block *sb, hfsplus_btree_key *key,
+			  u32 parent, const struct qstr *str)
 {
 	int len, err;
 
@@ -58,15 +58,15 @@ int hfsplus_cat_build_key(struct super_block *sb,
 
 /* Generates key for catalog thread record. */
 void hfsplus_cat_build_key_with_cnid(struct super_block *sb,
-			hfsplus_btree_key *key, u32 parent)
+				     hfsplus_btree_key *key, u32 parent)
 {
 	key->cat.parent = cpu_to_be32(parent);
 	key->cat.name.length = 0;
 	key->key_len = cpu_to_be16(6);
 }
 
-static void hfsplus_cat_build_key_uni(hfsplus_btree_key *key, u32 parent,
-				      struct hfsplus_unistr *name)
+void hfsplus_cat_build_key_uni(hfsplus_btree_key *key, u32 parent,
+			       const struct hfsplus_unistr *name)
 {
 	int ustrlen;
 
@@ -103,7 +103,7 @@ void hfsplus_cat_set_perms(struct inode *inode, struct hfsplus_perm *perms)
 }
 
 static int hfsplus_cat_build_record(hfsplus_cat_entry *entry,
-		u32 cnid, struct inode *inode)
+				    u32 cnid, struct inode *inode)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(inode->i_sb);
 
@@ -187,7 +187,23 @@ static int hfsplus_fill_cat_thread(struct super_block *sb,
 	if (unlikely(err < 0))
 		return err;
 
-	return 10 + be16_to_cpu(entry->thread.nodeName.length) * 2;
+	return hfsplus_cat_thread_size(&entry->thread);
+}
+
+static int hfsplus_fill_cat_thread_uni(hfsplus_cat_entry *entry, int type,
+				       u32 parentid,
+				       const struct hfsplus_unistr *name)
+{
+	u16 len = be16_to_cpu(name->length);
+
+	entry->type = cpu_to_be16(type);
+	entry->thread.reserved = 0;
+	entry->thread.parentID = cpu_to_be32(parentid);
+	entry->thread.nodeName.length = name->length;
+	memcpy(entry->thread.nodeName.unicode, name->unicode,
+	       len * sizeof(hfsplus_unichr));
+
+	return hfsplus_cat_thread_size(&entry->thread);
 }
 
 /* Try to get a catalog entry for given catalog id */
@@ -250,17 +266,25 @@ static void hfsplus_subfolders_dec(struct inode *dir)
 	}
 }
 
-int hfsplus_create_cat(u32 cnid, struct inode *dir,
-		const struct qstr *str, struct inode *inode)
+/*
+ * Create catalog records for the name given either as @str (it is converted
+ * by means of the mount's nls table) or as already converted @name.
+ */
+static int __hfsplus_create_cat(u32 cnid, struct inode *dir,
+				const struct qstr *str,
+				const struct hfsplus_unistr *name,
+				struct inode *inode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct hfs_find_data fd;
 	hfsplus_cat_entry entry;
+	int type;
 	int entry_size;
 	int err;
 
 	hfs_dbg("name %s, cnid %u, i_nlink %d\n",
-		str->name, cnid, inode->i_nlink);
+		str ? (const char *)str->name : "<unicode>",
+		cnid, inode->i_nlink);
 	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &fd);
 	if (err)
 		return err;
@@ -274,10 +298,14 @@ int hfsplus_create_cat(u32 cnid, struct inode *dir,
 		goto err2;
 
 	hfsplus_cat_build_key_with_cnid(sb, fd.search_key, cnid);
-	entry_size = hfsplus_fill_cat_thread(sb, &entry,
-		S_ISDIR(inode->i_mode) ?
-			HFSPLUS_FOLDER_THREAD : HFSPLUS_FILE_THREAD,
-		dir->i_ino, str);
+	type = S_ISDIR(inode->i_mode) ?
+			HFSPLUS_FOLDER_THREAD : HFSPLUS_FILE_THREAD;
+	if (name)
+		entry_size = hfsplus_fill_cat_thread_uni(&entry, type,
+							 dir->i_ino, name);
+	else
+		entry_size = hfsplus_fill_cat_thread(sb, &entry, type,
+						     dir->i_ino, str);
 	if (unlikely(entry_size < 0)) {
 		err = entry_size;
 		goto err2;
@@ -293,9 +321,13 @@ int hfsplus_create_cat(u32 cnid, struct inode *dir,
 	if (err)
 		goto err2;
 
-	err = hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
-	if (unlikely(err))
-		goto err1;
+	if (name)
+		hfsplus_cat_build_key_uni(fd.search_key, dir->i_ino, name);
+	else {
+		err = hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
+		if (unlikely(err))
+			goto err1;
+	}
 
 	entry_size = hfsplus_cat_build_record(&entry, cnid, inode);
 	err = hfs_brec_find(&fd, hfs_find_rec_by_key);
@@ -326,6 +358,23 @@ err1:
 err2:
 	hfs_find_exit(&fd);
 	return err;
+}
+
+int hfsplus_create_cat(u32 cnid, struct inode *dir,
+			const struct qstr *str, struct inode *inode)
+{
+	return __hfsplus_create_cat(cnid, dir, str, NULL, inode);
+}
+
+/*
+ * Create catalog records for the name that is independent from
+ * the mount's nls table (for example, the hidden directory name).
+ */
+int hfsplus_create_cat_uni(u32 cnid, struct inode *dir,
+			   const struct hfsplus_unistr *name,
+			   struct inode *inode)
+{
+	return __hfsplus_create_cat(cnid, dir, NULL, name, inode);
 }
 
 int hfsplus_delete_cat(u32 cnid, struct inode *dir, const struct qstr *str)

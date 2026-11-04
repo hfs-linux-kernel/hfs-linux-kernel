@@ -57,8 +57,24 @@
 
 #define HFSP_MOUNT_VERSION		0x482b4c78	/* 'H+Lx' */
 
-#define HFSP_HIDDENDIR_NAME \
-	"\xe2\x90\x80\xe2\x90\x80\xe2\x90\x80\xe2\x90\x80HFS+ Private Data"
+/*
+ * The name of the hidden directory is HFSP_HIDDENDIR_NUL_COUNT U+0000
+ * characters followed by HFSP_HIDDENDIR_SUFFIX. On disk, it is stored
+ * in UTF-16 and has HFSP_HIDDENDIR_NAME_UTF16_LEN characters. In Linux,
+ * it is HFSP_HIDDENDIR_NAME_UTF8, where every U+0000 is represented by
+ * U+2400 (SYMBOL FOR NULL); it has HFSP_HIDDENDIR_NAME_UTF8_LEN bytes.
+ */
+#define HFSP_HIDDENDIR_NUL_COUNT	4
+#define HFSP_HIDDENDIR_SUFFIX		"HFS+ Private Data"
+#define HFSP_HIDDENDIR_SUFFIX_LEN	(sizeof(HFSP_HIDDENDIR_SUFFIX) - 1)
+#define HFSP_HIDDENDIR_NAME_UTF16_LEN \
+	(HFSP_HIDDENDIR_NUL_COUNT + HFSP_HIDDENDIR_SUFFIX_LEN)
+#define HFSP_SYMBOL_FOR_NULL_UTF8	"\xe2\x90\x80"
+#define HFSP_HIDDENDIR_NAME_UTF8 \
+	(HFSP_SYMBOL_FOR_NULL_UTF8 HFSP_SYMBOL_FOR_NULL_UTF8 \
+	 HFSP_SYMBOL_FOR_NULL_UTF8 HFSP_SYMBOL_FOR_NULL_UTF8 \
+	 HFSP_HIDDENDIR_SUFFIX)
+#define HFSP_HIDDENDIR_NAME_UTF8_LEN	(sizeof(HFSP_HIDDENDIR_NAME_UTF8) - 1)
 
 /* various FIXED size parameters */
 #define HFS_SECTOR_SIZE			512	/* size of an HFS sector */
