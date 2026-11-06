@@ -50,14 +50,7 @@ int hfs_write_begin(const struct kiocb *iocb, struct address_space *mapping,
 		    void **fsdata)
 {
 	struct inode *inode = mapping->host;
-	struct hfs_sb_info *sbi = HFS_SB(inode->i_sb);
-	loff_t total_capacity;
 	int ret;
-
-	total_capacity = (loff_t)sbi->fs_ablocks * sbi->alloc_blksz;
-
-	if (pos >= total_capacity)
-		return -EFBIG;
 
 	ret = cont_write_begin(iocb, mapping, pos, len, foliop, fsdata,
 				hfs_get_block,

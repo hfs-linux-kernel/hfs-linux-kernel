@@ -359,6 +359,14 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto bail;
 	}
 
+	/*
+	 * HFS does not support sparse files, so every byte up to
+	 * the end-of-file has to be backed by an allocated block.
+	 * Therefore, a file can never be larger than the volume.
+	 */
+	sb->s_maxbytes = min_t(loff_t, MAX_NON_LFS,
+			       (loff_t)sbi->fs_ablocks * sbi->alloc_blksz);
+
 	/* try to get the root inode */
 	res = hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
 	if (res)
