@@ -672,7 +672,15 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/* Set up operations so we can load metadata */
 	sb->s_op = &hfsplus_sops;
-	sb->s_maxbytes = MAX_LFS_FILESIZE;
+
+	/*
+	 * HFS+ does not support sparse files, so every byte up to
+	 * the end-of-file has to be backed by an allocated block.
+	 * Therefore, a file can never be larger than the volume.
+	 */
+	sb->s_maxbytes = min_t(loff_t, MAX_LFS_FILESIZE,
+			       (loff_t)sbi->total_blocks <<
+					sbi->alloc_blksz_shift);
 
 	if (!(vhdr->attributes & cpu_to_be32(HFSPLUS_VOL_UNMNT))) {
 		pr_warn("Filesystem was not cleanly unmounted, running fsck.hfsplus is recommended.  mounting read-only.\n");
