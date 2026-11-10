@@ -507,11 +507,20 @@ void hfs_file_truncate(struct inode *inode)
 		if (res)
 			inode->i_size = HFS_I(inode)->phys_size;
 		return;
-	} else if (inode->i_size == HFS_I(inode)->phys_size)
-		return;
+	}
+
 	size = inode->i_size + HFS_SB(sb)->alloc_blksz - 1;
 	blk_cnt = size / HFS_SB(sb)->alloc_blksz;
 	alloc_cnt = HFS_I(inode)->alloc_blocks;
+
+	/*
+	 * hfs_extend_file() allocates whole clumps, so alloc_blocks can
+	 * be ahead of phys_size even when phys_size matches i_size. Return
+	 * early only if neither the size nor the allocation needs trimming.
+	 */
+	if (inode->i_size == HFS_I(inode)->phys_size && blk_cnt == alloc_cnt)
+		return;
+
 	if (blk_cnt == alloc_cnt)
 		goto out;
 
