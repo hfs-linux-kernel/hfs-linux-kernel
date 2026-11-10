@@ -570,11 +570,18 @@ void hfsplus_file_truncate(struct inode *inode)
 			return;
 		mark_inode_dirty(inode);
 		return;
-	} else if (inode->i_size == hip->phys_size)
-		return;
+	}
 
 	blk_cnt = (inode->i_size + HFSPLUS_SB(sb)->alloc_blksz - 1) >>
 			HFSPLUS_SB(sb)->alloc_blksz_shift;
+
+	/*
+	 * hfsplus_file_extend() allocates whole clumps, so alloc_blocks can
+	 * be ahead of phys_size even when phys_size matches i_size. Return
+	 * early only if neither the size nor the allocation needs trimming.
+	 */
+	if (inode->i_size == hip->phys_size && blk_cnt == hip->alloc_blocks)
+		return;
 
 	mutex_lock(&hip->extents_lock);
 
