@@ -773,7 +773,6 @@ static int hfs_file_fsync(struct file *filp, loff_t start, loff_t end,
 	ret = file_write_and_wait_range(filp, start, end);
 	if (ret)
 		return ret;
-	inode_lock(inode);
 
 	/* sync the inode to buffers */
 	ret = write_inode_now(inode, 0);
@@ -785,7 +784,6 @@ static int hfs_file_fsync(struct file *filp, loff_t start, loff_t end,
 	err = sync_blockdev(sb->s_bdev);
 	if (!ret)
 		ret = err;
-	inode_unlock(inode);
 	return ret;
 }
 
