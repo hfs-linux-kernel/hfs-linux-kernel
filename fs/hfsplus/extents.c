@@ -552,15 +552,16 @@ int hfsplus_file_extend(struct inode *inode, bool zeroout)
 	struct super_block *sb = inode->i_sb;
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	struct hfsplus_inode_info *hip = HFSPLUS_I(inode);
+	u64 bitmap_bits = (u64)sbi->alloc_file.inode->i_size * BITS_PER_BYTE;
+	u32 used_blocks = sbi->total_blocks - sbi->free_blocks;
 	u32 start, len, goal;
 	int res;
 
-	if (sbi->alloc_file.inode->i_size * 8 <
-	    sbi->total_blocks - sbi->free_blocks + 8) {
+	if (bitmap_bits < (u64)used_blocks + HFSPLUS_ALLOC_BITMAP_SPARE_BITS) {
 		/* extend alloc file */
 		pr_err_ratelimited("extend alloc file! (%llu,%u,%u)\n",
-				   sbi->alloc_file.inode->i_size * 8,
-				   sbi->total_blocks, sbi->free_blocks);
+				   bitmap_bits, sbi->total_blocks,
+				   sbi->free_blocks);
 		return -ENOSPC;
 	}
 

@@ -120,6 +120,12 @@ struct hfsplus_alloc_file {
 	struct hfsplus_overflow_extents overflow;
 };
 
+/*
+ * Bits the allocation bitmap must have beyond the blocks in use for
+ * hfsplus_file_extend() to allocate more blocks.
+ */
+#define HFSPLUS_ALLOC_BITMAP_SPARE_BITS	8
+
 struct hfsplus_sb_info {
 	void *s_vhdr_buf;
 	struct hfsplus_vh *s_vhdr;
