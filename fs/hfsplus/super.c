@@ -50,30 +50,48 @@ static int hfsplus_system_read_fork(struct inode *inode,
 	return 0;
 }
 
+static struct lock_class_key hfsplus_ext_extents_lock_key;
+static struct lock_class_key hfsplus_cat_extents_lock_key;
+static struct lock_class_key hfsplus_alloc_extents_lock_key;
+static struct lock_class_key hfsplus_start_extents_lock_key;
+static struct lock_class_key hfsplus_attr_extents_lock_key;
+
 static int hfsplus_system_read_inode(struct inode *inode)
 {
 	struct hfsplus_vh *vhdr = HFSPLUS_SB(inode->i_sb)->s_vhdr;
+	struct lock_class_key *key;
+	const char *name;
 	int err;
 
 	switch (inode->i_ino) {
 	case HFSPLUS_EXT_CNID:
 		err = hfsplus_system_read_fork(inode, &vhdr->ext_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
+		key = &hfsplus_ext_extents_lock_key;
+		name = "ext_file_extents_lock";
 		break;
 	case HFSPLUS_CAT_CNID:
 		err = hfsplus_system_read_fork(inode, &vhdr->cat_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
+		key = &hfsplus_cat_extents_lock_key;
+		name = "cat_file_extents_lock";
 		break;
 	case HFSPLUS_ALLOC_CNID:
 		err = hfsplus_system_read_fork(inode, &vhdr->alloc_file);
 		inode->i_mapping->a_ops = &hfsplus_aops;
+		key = &hfsplus_alloc_extents_lock_key;
+		name = "alloc_file_extents_lock";
 		break;
 	case HFSPLUS_START_CNID:
 		err = hfsplus_system_read_fork(inode, &vhdr->start_file);
+		key = &hfsplus_start_extents_lock_key;
+		name = "start_file_extents_lock";
 		break;
 	case HFSPLUS_ATTR_CNID:
 		err = hfsplus_system_read_fork(inode, &vhdr->attr_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
+		key = &hfsplus_attr_extents_lock_key;
+		name = "attr_file_extents_lock";
 		break;
 	default:
 		return -EIO;
@@ -81,6 +99,8 @@ static int hfsplus_system_read_inode(struct inode *inode)
 
 	if (err)
 		return err;
+
+	lockdep_set_class_and_name(&HFSPLUS_I(inode)->extents_lock, key, name);
 
 	/*
 	 * Assign a dummy file type, for may_open() requires that
