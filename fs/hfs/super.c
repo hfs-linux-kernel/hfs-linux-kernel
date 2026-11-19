@@ -203,8 +203,8 @@ enum {
 };
 
 static const struct fs_parameter_spec hfs_param_spec[] = {
-	fsparam_u32	("uid",		opt_uid),
-	fsparam_u32	("gid",		opt_gid),
+	fsparam_uid	("uid",		opt_uid),
+	fsparam_gid	("gid",		opt_gid),
 	fsparam_u32oct	("umask",	opt_umask),
 	fsparam_u32oct	("file_umask",	opt_file_umask),
 	fsparam_u32oct	("dir_umask",	opt_dir_umask),
