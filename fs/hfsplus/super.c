@@ -777,6 +777,19 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 	}
 	sbi->alloc_file.inode = inode;
 
+	/*
+	 * The allocation bitmap has one bit per allocation block. The
+	 * bitmap code looks up any block below total_blocks in it, so it
+	 * must cover all of them.
+	 */
+	if (inode->i_size < DIV_ROUND_UP((u64)sbi->total_blocks,
+					 BITS_PER_BYTE)) {
+		pr_err("allocation file size %lld is too small for %u blocks\n",
+		       inode->i_size, sbi->total_blocks);
+		err = -EIO;
+		goto out_put_alloc_file;
+	}
+
 	err = hfsplus_ext_load_alloc_file(sb);
 	if (err)
 		goto out_put_alloc_file;
