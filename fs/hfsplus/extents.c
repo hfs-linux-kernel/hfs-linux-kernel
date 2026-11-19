@@ -53,7 +53,7 @@ static u32 hfsplus_ext_find_block(struct hfsplus_extent *ext, u32 off)
 	int i;
 	u32 count;
 
-	for (i = 0; i < 8; ext++, i++) {
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; ext++, i++) {
 		count = be32_to_cpu(ext->block_count);
 		if (off < count)
 			return be32_to_cpu(ext->start_block) + off;
@@ -68,17 +68,18 @@ static int hfsplus_ext_block_count(struct hfsplus_extent *ext)
 	int i;
 	u32 count = 0;
 
-	for (i = 0; i < 8; ext++, i++)
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; ext++, i++)
 		count += be32_to_cpu(ext->block_count);
 	return count;
 }
 
 static u32 hfsplus_ext_lastblock(struct hfsplus_extent *ext)
 {
+	int last_index = HFSPLUS_FORK_EXTENT_COUNT - 1;
 	int i;
 
-	ext += 7;
-	for (i = 0; i < 7; ext--, i++)
+	ext += last_index;
+	for (i = 0; i < last_index; ext--, i++)
 		if (ext->block_count)
 			break;
 	return be32_to_cpu(ext->start_block) + be32_to_cpu(ext->block_count);
@@ -225,6 +226,102 @@ static int hfsplus_ext_read_extent(struct inode *inode, u32 block)
 	return res;
 }
 
+/*
+ * The allocation bitmap is read through the allocation file with
+ * sbi->alloc_mutex held, sometimes by a task that holds the extents
+ * B-tree's tree_lock because it is growing the B-tree. So mapping a
+ * block of the allocation file must not search the extents B-tree.
+ *
+ * The allocation file is not resized while the volume is mounted, so
+ * read the extents of it that are not in the volume header once, at
+ * mount time, and map its blocks from them.
+ */
+int hfsplus_ext_load_alloc_file(struct super_block *sb)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
+	struct hfsplus_alloc_file *alloc_file = &sbi->alloc_file;
+	struct inode *inode = alloc_file->inode;
+	struct hfsplus_inode_info *hip = HFSPLUS_I(inode);
+	struct hfsplus_extent *ext = NULL, *new;
+	struct hfs_find_data fd;
+	u32 block = hip->first_blocks;
+	u32 nr = 0;
+	int res;
+
+	if (block >= hip->alloc_blocks)
+		return 0;
+
+	res = hfs_find_init(sbi->ext_tree, &fd);
+	if (res)
+		return res;
+
+	while (block < hip->alloc_blocks) {
+		hfsplus_extent_rec rec;
+		u32 start_block, count;
+		u32 rest_blocks;
+
+		res = __hfsplus_ext_read_extent(&fd, rec, inode->i_ino, block,
+						HFSPLUS_TYPE_DATA);
+		if (res)
+			goto fail;
+
+		start_block = be32_to_cpu(fd.key->ext.start_block);
+		count = hfsplus_ext_block_count(rec);
+		rest_blocks = hip->alloc_blocks - block;
+
+		if (start_block != block || count == 0 || count > rest_blocks) {
+			res = -EIO;
+			goto fail;
+		}
+
+		new = krealloc_array(ext, nr + ARRAY_SIZE(rec), sizeof(*ext),
+				     GFP_KERNEL);
+		if (!new) {
+			res = -ENOMEM;
+			goto fail;
+		}
+
+		ext = new;
+		memcpy(ext + nr, rec, sizeof(rec));
+		nr += ARRAY_SIZE(rec);
+		block += count;
+	}
+
+	hfs_find_exit(&fd);
+	alloc_file->overflow.extents = ext;
+	alloc_file->overflow.count = nr;
+	return 0;
+
+fail:
+	hfs_find_exit(&fd);
+	kfree(ext);
+	pr_err("can't read the allocation file extents at block %u: %d\n",
+	       block, res);
+	return res == -ENOENT ? -EIO : res;
+}
+
+/*
+ * Map @ablock of the allocation file, which lies beyond its extents in
+ * the volume header. Returns 0 if it is not allocated.
+ */
+static u32 hfsplus_ext_alloc_file_block(struct super_block *sb, u32 ablock)
+{
+	struct hfsplus_alloc_file *alloc_file = &HFSPLUS_SB(sb)->alloc_file;
+	struct hfsplus_overflow_extents *overflow = &alloc_file->overflow;
+	u32 off = ablock - HFSPLUS_I(alloc_file->inode)->first_blocks;
+	u32 start_block, count;
+	u32 i;
+
+	for (i = 0; i < overflow->count; i++) {
+		start_block = be32_to_cpu(overflow->extents[i].start_block);
+		count = be32_to_cpu(overflow->extents[i].block_count);
+		if (off < count)
+			return start_block + off;
+		off -= count;
+	}
+	return 0;
+}
+
 /* Get a block at iblock for inode, possibly allocating if create */
 int hfsplus_get_block(struct inode *inode, sector_t iblock,
 		      struct buffer_head *bh_result, int create)
@@ -258,8 +355,21 @@ int hfsplus_get_block(struct inode *inode, sector_t iblock,
 		goto done;
 	}
 
-	if (inode->i_ino == HFSPLUS_EXT_CNID)
+	switch (inode->i_ino) {
+	case HFSPLUS_EXT_CNID:
 		return -EIO;
+
+	case HFSPLUS_ALLOC_CNID:
+		dblock = hfsplus_ext_alloc_file_block(sb, ablock);
+		if (!dblock)
+			return -EIO;
+		else
+			goto done;
+
+	default:
+		/* continue logic */
+		break;
+	}
 
 	mutex_lock(&hip->extents_lock);
 
@@ -303,7 +413,7 @@ static void hfsplus_dump_extent(struct hfsplus_extent *extent)
 	int i;
 
 	hfs_dbg("extent   ");
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; i++)
 		hfs_dbg(" start_block %u, block_count %u",
 			be32_to_cpu(extent[i].start_block),
 			be32_to_cpu(extent[i].block_count));
@@ -317,7 +427,7 @@ static int hfsplus_add_extent(struct hfsplus_extent *extent, u32 offset,
 	int i;
 
 	hfsplus_dump_extent(extent);
-	for (i = 0; i < 8; extent++, i++) {
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; extent++, i++) {
 		count = be32_to_cpu(extent->block_count);
 		if (offset == count) {
 			start = be32_to_cpu(extent->start_block);
@@ -347,7 +457,7 @@ static int hfsplus_free_extents(struct super_block *sb,
 	int err = 0;
 
 	hfsplus_dump_extent(extent);
-	for (i = 0; i < 8; extent++, i++) {
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; extent++, i++) {
 		count = be32_to_cpu(extent->block_count);
 		if (offset == count)
 			goto found;
@@ -405,7 +515,7 @@ int hfsplus_free_fork(struct super_block *sb, u32 cnid,
 		return 0;
 
 	blocks = 0;
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < HFSPLUS_FORK_EXTENT_COUNT; i++)
 		blocks += be32_to_cpu(fork->extents[i].block_count);
 
 	res = hfsplus_free_extents(sb, fork->extents, blocks, blocks);
@@ -445,11 +555,11 @@ int hfsplus_file_extend(struct inode *inode, bool zeroout)
 	u32 start, len, goal;
 	int res;
 
-	if (sbi->alloc_file->i_size * 8 <
+	if (sbi->alloc_file.inode->i_size * 8 <
 	    sbi->total_blocks - sbi->free_blocks + 8) {
 		/* extend alloc file */
 		pr_err_ratelimited("extend alloc file! (%llu,%u,%u)\n",
-				   sbi->alloc_file->i_size * 8,
+				   sbi->alloc_file.inode->i_size * 8,
 				   sbi->total_blocks, sbi->free_blocks);
 		return -ENOSPC;
 	}
@@ -517,7 +627,7 @@ out:
 	if (!res) {
 		hip->alloc_blocks += len;
 		mutex_unlock(&hip->extents_lock);
-		hfsplus_mark_inode_dirty(HFSPLUS_SB(sb)->alloc_file,
+		hfsplus_mark_inode_dirty(HFSPLUS_SB(sb)->alloc_file.inode,
 					 HFSPLUS_I_ALLOC_DIRTY);
 		hfsplus_mark_inode_dirty(inode, HFSPLUS_I_ALLOC_DIRTY);
 		return 0;
@@ -637,7 +747,7 @@ out_unlock:
 	hip->fs_blocks = (inode->i_size + sb->s_blocksize - 1) >>
 		sb->s_blocksize_bits;
 	inode_set_bytes(inode, hip->fs_blocks << sb->s_blocksize_bits);
-	hfsplus_mark_inode_dirty(HFSPLUS_SB(sb)->alloc_file,
+	hfsplus_mark_inode_dirty(HFSPLUS_SB(sb)->alloc_file.inode,
 				 HFSPLUS_I_ALLOC_DIRTY);
 	hfsplus_mark_inode_dirty(inode, HFSPLUS_I_ALLOC_DIRTY);
 }

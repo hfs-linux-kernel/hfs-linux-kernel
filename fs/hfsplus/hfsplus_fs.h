@@ -109,6 +109,17 @@ struct hfs_bnode {
 struct hfsplus_vh;
 struct hfs_btree;
 
+/* Extents of a special file that are not in the volume header */
+struct hfsplus_overflow_extents {
+	struct hfsplus_extent *extents;
+	u32 count;
+};
+
+struct hfsplus_alloc_file {
+	struct inode *inode;
+	struct hfsplus_overflow_extents overflow;
+};
+
 struct hfsplus_sb_info {
 	void *s_vhdr_buf;
 	struct hfsplus_vh *s_vhdr;
@@ -118,7 +129,7 @@ struct hfsplus_sb_info {
 	struct hfs_btree *cat_tree;
 	struct hfs_btree *attr_tree;
 	atomic_t attr_tree_state;
-	struct inode *alloc_file;
+	struct hfsplus_alloc_file alloc_file;
 	struct inode *hidden_dir;
 	struct nls_table *nls;
 
@@ -440,6 +451,7 @@ extern const struct file_operations hfsplus_dir_operations;
 int hfsplus_ext_cmp_key(const hfsplus_btree_key *k1,
 			const hfsplus_btree_key *k2);
 int hfsplus_ext_write_extent(struct inode *inode);
+int hfsplus_ext_load_alloc_file(struct super_block *sb);
 int hfsplus_get_block(struct inode *inode, sector_t iblock,
 		      struct buffer_head *bh_result, int create);
 int hfsplus_free_fork(struct super_block *sb, u32 cnid,

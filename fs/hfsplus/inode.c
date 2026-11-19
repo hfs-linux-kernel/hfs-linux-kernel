@@ -410,9 +410,9 @@ int hfsplus_file_fsync(struct file *file, loff_t start, loff_t end,
 	}
 
 	if (test_and_clear_bit(HFSPLUS_I_ALLOC_DIRTY,
-				&HFSPLUS_I(sbi->alloc_file)->flags)) {
+				&HFSPLUS_I(sbi->alloc_file.inode)->flags)) {
 		clear_bit(HFSPLUS_I_ALLOC_DIRTY, &hip->flags);
-		error2 = filemap_write_and_wait(sbi->alloc_file->i_mapping);
+		error2 = filemap_write_and_wait(sbi->alloc_file.inode->i_mapping);
 		if (!error)
 			error = error2;
 	}

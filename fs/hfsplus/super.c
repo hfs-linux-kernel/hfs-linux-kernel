@@ -298,7 +298,7 @@ static int hfsplus_sync_fs(struct super_block *sb, int wait)
 		if (!error)
 			error = error2;
 	}
-	error2 = filemap_write_and_wait(sbi->alloc_file->i_mapping);
+	error2 = filemap_write_and_wait(sbi->alloc_file.inode->i_mapping);
 	if (!error)
 		error = error2;
 
@@ -325,7 +325,7 @@ static void delayed_sync_fs(struct work_struct *work)
 	sbi->work_queued = 0;
 	spin_unlock(&sbi->work_lock);
 
-	err = hfsplus_sync_fs(sbi->alloc_file->i_sb, 1);
+	err = hfsplus_sync_fs(sbi->alloc_file.inode->i_sb, 1);
 	if (err)
 		pr_err("delayed sync fs err %d\n", err);
 }
@@ -399,7 +399,8 @@ static void hfsplus_put_super(struct super_block *sb)
 	if (!sb_rdonly(sb) && sbi->s_vhdr)
 		hfsplus_commit_clean_volume_header(sb);
 
-	iput(sbi->alloc_file);
+	iput(sbi->alloc_file.inode);
+	kfree(sbi->alloc_file.overflow.extents);
 	iput(sbi->hidden_dir);
 	hfs_btree_close(sbi->attr_tree);
 	hfs_btree_close(sbi->cat_tree);
@@ -754,7 +755,11 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = PTR_ERR(inode);
 		goto out_close_attr_tree;
 	}
-	sbi->alloc_file = inode;
+	sbi->alloc_file.inode = inode;
+
+	err = hfsplus_ext_load_alloc_file(sb);
+	if (err)
+		goto out_put_alloc_file;
 
 	/* Load the root directory */
 	root = hfsplus_iget(sb, HFSPLUS_ROOT_CNID);
@@ -816,7 +821,10 @@ out_put_root:
 	dput(sb->s_root);
 	sb->s_root = NULL;
 out_put_alloc_file:
-	iput(sbi->alloc_file);
+	iput(sbi->alloc_file.inode);
+	kfree(sbi->alloc_file.overflow.extents);
+	sbi->alloc_file.overflow.extents = NULL;
+	sbi->alloc_file.overflow.count = 0;
 out_close_attr_tree:
 	hfs_btree_close(sbi->attr_tree);
 out_close_cat_tree:

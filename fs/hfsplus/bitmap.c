@@ -33,7 +33,7 @@ int hfsplus_block_allocate(struct super_block *sb, u32 size,
 
 	hfs_dbg("size %u, offset %u, len %u\n", size, offset, len);
 	mutex_lock(&sbi->alloc_mutex);
-	mapping = sbi->alloc_file->i_mapping;
+	mapping = sbi->alloc_file.inode->i_mapping;
 	page = read_mapping_page(mapping, offset / PAGE_CACHE_BITS, NULL);
 	if (IS_ERR(page)) {
 		start = size;
@@ -192,7 +192,7 @@ int hfsplus_block_free(struct super_block *sb, u32 offset, u32 count)
 		return -ENOENT;
 
 	mutex_lock(&sbi->alloc_mutex);
-	mapping = sbi->alloc_file->i_mapping;
+	mapping = sbi->alloc_file.inode->i_mapping;
 	pnr = offset / PAGE_CACHE_BITS;
 	page = read_mapping_page(mapping, pnr, NULL);
 	if (IS_ERR(page))
