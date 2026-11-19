@@ -26,33 +26,61 @@ static void hfsplus_free_inode(struct inode *inode);
 #include "hfsplus_fs.h"
 #include "xattr.h"
 
+/*
+ * The logical size of a special file must fit within its allocated
+ * blocks. Otherwise its page cache would map blocks past the end of the
+ * extent records, which the code accessing these files (e.g. the bitmap
+ * code holding alloc_mutex) does not expect.
+ */
+static int hfsplus_system_read_fork(struct inode *inode,
+				    struct hfsplus_fork_raw *fork)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(inode->i_sb);
+	u64 size = be64_to_cpu(fork->total_size);
+	u32 total_blocks = be32_to_cpu(fork->total_blocks);
+	u64 alloc_size = (u64)total_blocks << sbi->alloc_blksz_shift;
+
+	if (size > alloc_size) {
+		pr_err("special file %llu: size %llu exceeds allocated size %llu\n",
+		       inode->i_ino, size, alloc_size);
+		return -EIO;
+	}
+
+	hfsplus_inode_read_fork(inode, fork);
+	return 0;
+}
+
 static int hfsplus_system_read_inode(struct inode *inode)
 {
 	struct hfsplus_vh *vhdr = HFSPLUS_SB(inode->i_sb)->s_vhdr;
+	int err;
 
 	switch (inode->i_ino) {
 	case HFSPLUS_EXT_CNID:
-		hfsplus_inode_read_fork(inode, &vhdr->ext_file);
+		err = hfsplus_system_read_fork(inode, &vhdr->ext_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
 		break;
 	case HFSPLUS_CAT_CNID:
-		hfsplus_inode_read_fork(inode, &vhdr->cat_file);
+		err = hfsplus_system_read_fork(inode, &vhdr->cat_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
 		break;
 	case HFSPLUS_ALLOC_CNID:
-		hfsplus_inode_read_fork(inode, &vhdr->alloc_file);
+		err = hfsplus_system_read_fork(inode, &vhdr->alloc_file);
 		inode->i_mapping->a_ops = &hfsplus_aops;
 		break;
 	case HFSPLUS_START_CNID:
-		hfsplus_inode_read_fork(inode, &vhdr->start_file);
+		err = hfsplus_system_read_fork(inode, &vhdr->start_file);
 		break;
 	case HFSPLUS_ATTR_CNID:
-		hfsplus_inode_read_fork(inode, &vhdr->attr_file);
+		err = hfsplus_system_read_fork(inode, &vhdr->attr_file);
 		inode->i_mapping->a_ops = &hfsplus_btree_aops;
 		break;
 	default:
 		return -EIO;
 	}
+
+	if (err)
+		return err;
 
 	/*
 	 * Assign a dummy file type, for may_open() requires that
